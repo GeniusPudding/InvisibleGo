@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>InvisibleGo</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>InvisibleGo</h1>
+    <div id="status">&nbsp;</div>
+  </header>
+
+  <div id="lobby" class="screen">
+    <div class="lobby-box">
+      <h2>Play InvisibleGo</h2>
+      <p class="sub">A 9x9 Go variant where you never see your opponent's stones.</p>
+      <label>
+        Your name
+        <input id="name-input" maxlength="20" placeholder="e.g. Alice">
+      </label>
+
+      <div class="section">
+        <h3>Match with a stranger</h3>
+        <button id="random-btn">Find random opponent</button>
+      </div>
+
+      <div class="section">
+        <h3>Play with a friend</h3>
+        <div class="row">
+          <button id="create-btn">Create private room</button>
+        </div>
+        <div class="row">
+          <input id="join-code" maxlength="4" placeholder="ROOM" autocomplete="off">
+          <button id="join-btn">Join room</button>
+        </div>
+      </div>
+
+      <div id="lobby-msg"></div>
+    </div>
+  </div>
+
+  <div id="waiting" class="screen hidden">
+    <div class="lobby-box">
+      <h2 id="waiting-title">Looking for an opponent...</h2>
+      <p id="waiting-msg" class="sub"></p>
+      <div id="room-code-display" class="hidden">
+        <span>Share this code with your friend:</span>
+        <div id="room-code"></div>
+      </div>
+      <button id="cancel-btn">Cancel</button>
+    </div>
+  </div>
+
+  <div id="game" class="screen hidden">
+    <main>
+      <div id="board-wrap">
+        <svg id="board" viewBox="0 0 540 540" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+      <aside id="sidebar">
+        <div id="color-label"></div>
+        <div id="opponent-label"></div>
+        <div id="info"></div>
+        <div id="controls">
+          <button id="pass-btn" disabled>Pass</button>
+          <button id="resign-btn" disabled>Resign</button>
+        </div>
+        <div id="message"></div>
+        <details id="rules">
+          <summary>Rules</summary>
+          <ul>
+            <li>9x9 Go board. You see <strong>only your own stones</strong>.</li>
+            <li>Empty-looking points may hide an opponent's stone.</li>
+            <li>You get <strong>up to 3 attempts per turn</strong>. All illegal
+                moves look identical &mdash; the game never tells you why.</li>
+            <li>3 illegal attempts auto-skip your turn (counts as a pass).</li>
+            <li>Two consecutive passes end the game; Chinese area scoring decides.</li>
+          </ul>
+        </details>
+      </aside>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

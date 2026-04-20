@@ -1,0 +1,30 @@
+# InvisibleGo reverse proxy + TLS.
+#
+# Caddy terminates TLS and forwards HTTP + WebSocket to the uvicorn backend
+# on 127.0.0.1:8000. Certificates are obtained automatically from Let's
+# Encrypt the first time the server is reached via a domain.
+#
+# --- WITH A DOMAIN (recommended) ---
+# 1. Point an A record at this server's public IP
+# 2. Replace `game.example.com` with your domain
+# 3. sudo systemctl reload caddy
+# 4. First request takes a few seconds while ACME provisions the cert
+
+game.example.com {
+    reverse_proxy 127.0.0.1:8000
+    encode gzip
+    log {
+        output file /var/log/caddy/invisiblego.log
+        format json
+    }
+}
+
+# --- IP-ONLY / HTTP FALLBACK (for first-time smoke tests) ---
+# Remove the domain block above and uncomment this to serve over plain
+# HTTP on port 80. Browsers accept ws:// over http:// same-origin. Do NOT
+# ship this in production — no encryption, anyone on the network can see
+# moves. Useful only for verifying the box is reachable before DNS.
+#
+# :80 {
+#     reverse_proxy 127.0.0.1:8000
+# }
