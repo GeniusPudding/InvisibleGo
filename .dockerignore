@@ -1,0 +1,24 @@
+# Keep the build context minimal.
+.git
+.github
+.claude
+.pytest_cache
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.vscode
+.idea
+venv
+.venv
+dist
+build
+*.egg-info
+
+# Not needed in the server image
+tests
+deploy
+InvisibleGo.spec
+desktop_main.py
+frontend/desktop
+*.md

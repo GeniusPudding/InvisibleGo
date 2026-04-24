@@ -1,30 +1,31 @@
-# InvisibleGo reverse proxy + TLS.
+# Caddy reverse proxy for the InvisibleGo web server.
 #
-# Caddy terminates TLS and forwards HTTP + WebSocket to the uvicorn backend
-# on 127.0.0.1:8000. Certificates are obtained automatically from Let's
-# Encrypt the first time the server is reached via a domain.
+# Caddy terminates TLS (auto Let's Encrypt) and forwards HTTP + WebSocket
+# to the `invisiblego` container on port 8000. The hostname `invisiblego`
+# works because docker-compose creates an internal DNS entry for each
+# service, reachable by service name from other containers on the same
+# network.
 #
-# --- WITH A DOMAIN (recommended) ---
-# 1. Point an A record at this server's public IP
-# 2. Replace `game.example.com` with your domain
-# 3. sudo systemctl reload caddy
-# 4. First request takes a few seconds while ACME provisions the cert
+# --- WITH A DOMAIN (recommended for public) ---
+# 1. Point an A record at this host's public IP.
+# 2. Replace `game.example.com` with your domain.
+# 3. docker compose up -d  (or `docker compose restart caddy` if stack is running)
+# 4. First request takes a few seconds while ACME provisions the cert.
 
 game.example.com {
-    reverse_proxy 127.0.0.1:8000
+    reverse_proxy invisiblego:8000
     encode gzip
     log {
-        output file /var/log/caddy/invisiblego.log
+        output stdout
         format json
     }
 }
 
-# --- IP-ONLY / HTTP FALLBACK (for first-time smoke tests) ---
-# Remove the domain block above and uncomment this to serve over plain
-# HTTP on port 80. Browsers accept ws:// over http:// same-origin. Do NOT
-# ship this in production — no encryption, anyone on the network can see
-# moves. Useful only for verifying the box is reachable before DNS.
+# --- IP-ONLY / HTTP FALLBACK (first-time smoke test before DNS) ---
+# Comment the block above and uncomment this to serve HTTP on :80.
+# Browsers accept ws:// over http:// for same-origin, so the game works,
+# but there is no encryption — don't leave this on in production.
 #
 # :80 {
-#     reverse_proxy 127.0.0.1:8000
+#     reverse_proxy invisiblego:8000
 # }

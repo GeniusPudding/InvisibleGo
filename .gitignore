@@ -27,6 +27,7 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+.env
 
 # Claude Code local settings
 .claude/settings.local.json

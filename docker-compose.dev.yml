@@ -1,0 +1,10 @@
+# Dev overlay: expose the app directly on :8000, skip Caddy/TLS.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  invisiblego:
+    ports:
+      - "8000:8000"
+
+  caddy:
+    profiles: ["disabled"]  # skip Caddy in dev

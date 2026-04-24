@@ -29,8 +29,34 @@ frontend/   Clients that speak the protocol:
               desktop/       — PySide6 GUI (LAN protocol under the hood)
               web/           — browser SVG UI (served by transport/web)
 tests/      pytest suite (rules, protocol, session, full games, matchmaker).
-deploy/     One-shot systemd + Caddy install for a fresh Ubuntu VM.
+deploy/     Deployment configs:
+              Caddyfile         — reverse proxy + Let's Encrypt TLS
+              setup-docker.sh   — install Docker on a fresh Ubuntu VM
+              aws-provision.*   — AWS EC2 one-command provisioning (bash + ps1)
+              invisiblego.service, setup.sh — legacy systemd path (alternative)
+Dockerfile, docker-compose.yml, docker-compose.dev.yml — container stack
 ```
+
+## Tech stack
+
+| Layer | Tools |
+|-------|-------|
+| Core rules engine | Pure Python 3.12 (stdlib only) |
+| Web server | FastAPI + `uvicorn[standard]` + WebSockets |
+| Web frontend | Vanilla HTML / CSS / JS, SVG board |
+| Desktop GUI | PySide6 (Qt 6) — threaded blocking socket client |
+| LAN / CLI | Python stdlib (`asyncio`, `socket`) |
+| Tests | `pytest` + `pytest-asyncio` |
+| Container / orchestration | Docker + Docker Compose |
+| TLS / reverse proxy | Caddy (auto Let's Encrypt) |
+| Desktop packaging | PyInstaller |
+| Cloud provisioning | AWS CLI scripts (bash + PowerShell) |
+
+All four client types (CLI, LAN, web, desktop) speak the **same JSON
+protocol** against the same `GameSession`. Adding another frontend —
+iOS app, Android app, Flutter, React Native, Discord bot — is a new
+client that connects to the same WebSocket endpoint. **Zero server
+changes** needed per new platform.
 
 ## Install
 
@@ -93,12 +119,22 @@ python -m transport.lan.server --host 127.0.0.1 --port 5555
 python -m transport.lan.client --host 127.0.0.1 --port 5555
 ```
 
-### Web — browser UI
+### Web — browser UI (direct Python)
 
 ```bash
 uvicorn transport.web.server:app --host 127.0.0.1 --port 8000
 # open http://127.0.0.1:8000/ in two browser windows
 ```
+
+### Web — browser UI (Docker, mirrors production)
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# http://localhost:8000
+```
+
+The dev overlay exposes `:8000` directly and skips Caddy. In production
+the same `docker-compose.yml` brings up Caddy with auto-TLS on `:443`.
 
 The web server includes a matchmaker: each client can either `create`
 a room (gets a 4-character code) or `join` by code, or request
@@ -131,20 +167,59 @@ transport-agnostic `GameSession` (territory split, corner capture,
 ko attempt + resolution, auto-skip into double pass, resign mid-game,
 symmetric tie) and asserts on the final `game_end` payload.
 
-## Deployment (VM)
+## Deployment (Docker, primary path)
 
-`deploy/setup.sh` is a one-shot installer for a fresh Ubuntu 22.04 /
-24.04 host (AWS EC2, Oracle Cloud, Contabo, etc.). It creates a
-dedicated system user, installs the web extras in `/opt/invisiblego`,
-installs Caddy for auto-TLS, and enables both as systemd services.
+The production stack is `docker-compose.yml` at the repo root: one
+container for the Python + WebSocket server, one container for Caddy
+terminating TLS and reverse-proxying to it.
+
+On a fresh Ubuntu 22.04 / 24.04 VM (AWS EC2, Oracle Cloud, Contabo, …):
 
 ```bash
 git clone https://github.com/GeniusPudding/InvisibleGo.git ~/InvisibleGo
 cd ~/InvisibleGo
-sudo bash deploy/setup.sh
-# edit /etc/caddy/Caddyfile to point at your domain, then:
-sudo systemctl reload caddy
+sudo bash deploy/setup-docker.sh     # installs Docker + brings the stack up
+# edit deploy/Caddyfile to set your domain, then:
+docker compose restart caddy
 ```
+
+Redeploy after `git pull`:
+```bash
+docker compose up -d --build
+```
+
+TLS state (ACME account, issued certs) lives in the `caddy_data` named
+volume and survives `docker compose down`/`up`.
+
+Multi-service expansion (add an API, bot, or second game on the same
+VM):
+1. Add a new `services:` entry to `docker-compose.yml`
+2. Add a subdomain block to `deploy/Caddyfile`
+3. `docker compose up -d && docker compose restart caddy`
+
+Caddy handles TLS for every new subdomain automatically.
+
+### Legacy path (systemd + venv + Caddy on host)
+
+`deploy/setup.sh` keeps the non-Docker install working on a fresh
+Ubuntu host (creates a dedicated system user, `/opt/invisiblego` venv,
+systemd unit, host-level Caddy). Use this if Docker is a dealbreaker
+on the target host. Both paths expose the same protocol.
+
+### AWS EC2 provisioning
+
+One command builds the VM, key pair, security group, and Elastic IP:
+
+```bash
+# macOS / Linux / Git Bash:
+bash deploy/aws-provision.sh
+
+# Windows PowerShell:
+powershell -ExecutionPolicy Bypass -File .\deploy\aws-provision.ps1
+```
+
+Requires `aws configure` to have run previously. Idempotent: re-running
+detects existing resources by name.
 
 Open ports 80 and 443 at the cloud provider's firewall; SSH only from
 trusted IPs.
@@ -167,15 +242,13 @@ PyInstaller does not cross-compile — run once per target OS.
 - [x] `transport/web/` + `frontend/web/` — FastAPI + WebSocket + browser UI
 - [x] `frontend/desktop/` — PySide6 GUI client
 - [x] Matchmaker (room codes + random pairing) in `transport/web/`
-- [ ] **P2P connectivity** — direct peer-to-peer play without a central
-      server. Candidates under evaluation:
-      - WebRTC data channels with a minimal signaling relay (so the
-        matchmaker still arranges introductions but gameplay traffic
-        goes peer-to-peer)
-      - libp2p / hole punching for a fully decentralized mode
-      - The existing LAN TCP transport already handles direct
-        peer-to-peer on a trusted network; P2P work extends it across
-        NATs
+- [ ] **Online lobby** — player list, direct challenges, ratings.
+      Architecture stays hub-and-spoke through the matchmaker (same
+      model as OGS / KGS); hidden-information rules rule out truly
+      trustless P2P for strangers. LAN / friend-hosted direct play is
+      already supported via `transport/lan/`.
+- [ ] **Mobile clients** — iOS / Android / Flutter apps consuming the
+      same WebSocket protocol. No server changes required.
 - [ ] AI opponent (KataGo-adjacent or custom; must respect the
       hidden-information handicap — no access to the opponent's board)
 

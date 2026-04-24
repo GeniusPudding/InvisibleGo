@@ -140,32 +140,59 @@ Tests:
 QT_QPA_PLATFORM=offscreen pytest   # offscreen needed for desktop tests
 ```
 
-## Deployment (Linux VM + Caddy)
+## Deployment (Docker + Caddy, primary path)
 
-Server-side deployment lives in `deploy/`:
+Server-side runs as a Docker Compose stack — one service per container,
+Caddy in front as the TLS-terminating reverse proxy. Same compose file
+works for local dev and production.
 
 ```
+Dockerfile              web server image (Python 3.12 + FastAPI + uvicorn)
+docker-compose.yml      web service + Caddy, auto-TLS, persistent cert volume
+docker-compose.dev.yml  overlay: expose :8000 on host, skip Caddy (local dev)
 deploy/
-├── invisiblego.service   systemd unit: runs uvicorn as invisiblego user on :8000
-├── Caddyfile             Caddy reverse proxy + automatic Let's Encrypt TLS
-└── setup.sh              one-shot installer for Ubuntu 22.04/24.04
+├── Caddyfile              reverse-proxy + Let's Encrypt config
+├── setup-docker.sh        fresh-VM installer (Docker + compose up)
+├── aws-provision.sh       one-command AWS EC2 provisioning (bash)
+├── aws-provision.ps1      same, PowerShell
+├── invisiblego.service    legacy systemd unit (alternative to Docker)
+└── setup.sh               legacy systemd-based installer (alternative)
 ```
 
-On a fresh Ubuntu VM (AWS EC2, Oracle Cloud, Contabo, etc.):
+Local dev:
+```
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+# http://localhost:8000
+```
 
+Production (fresh Ubuntu VM):
 ```
 git clone <repo-url> ~/InvisibleGo && cd ~/InvisibleGo
-sudo bash deploy/setup.sh
+sudo bash deploy/setup-docker.sh
+# edit deploy/Caddyfile to set your domain, then:
+docker compose restart caddy
 ```
 
-The installer creates a `/opt/invisiblego` directory with its own venv and
-a dedicated `invisiblego` system user, installs Caddy, enables both as
-systemd services, and binds uvicorn to 127.0.0.1:8000 so only Caddy can
-reach it. Edit `/etc/caddy/Caddyfile` to set your domain, then
-`systemctl reload caddy` for auto-TLS.
+Caddy auto-obtains Let's Encrypt certs the first time a domain is
+reached. TLS state persists in the `caddy_data` named volume across
+`docker compose down` / `up`.
 
-Firewall: open 80 (for ACME + HTTP redirect) and 443 (HTTPS) in the cloud
+Firewall: open 80 (ACME + HTTP redirect) and 443 (HTTPS) in the cloud
 provider's security group. SSH (22) only from trusted IPs.
+
+### Multi-service expansion
+
+When you add another backend service (API, bot, second game), the
+pattern repeats cleanly:
+
+1. Add a new `build:` service block to `docker-compose.yml`
+2. Expose its port on the compose-internal network
+3. Add a `your-subdomain.yourname.dev { reverse_proxy newservice:PORT }`
+   block to `deploy/Caddyfile`
+4. `docker compose up -d && docker compose restart caddy`
+
+Caddy handles TLS for every subdomain automatically; no per-service
+certificate management.
 
 ## Packaging (PyInstaller)
 

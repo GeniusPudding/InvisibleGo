@@ -1,0 +1,39 @@
+# Full InvisibleGo stack: web server + Caddy reverse proxy with auto-TLS.
+#
+# Local dev (no TLS, visit http://localhost:8000):
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Production (Caddy terminates TLS, requires a domain pointing at the host):
+#   docker compose up -d
+#
+# Edit deploy/Caddyfile to set your domain before deploying.
+
+services:
+  invisiblego:
+    build: .
+    image: invisiblego:latest
+    container_name: invisiblego
+    restart: unless-stopped
+    expose:
+      - "8000"
+    # Uncomment to also expose directly on host for debugging:
+    # ports:
+    #   - "8000:8000"
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: invisiblego-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - invisiblego
+
+volumes:
+  caddy_data:       # TLS certs, ACME account — persist across restarts
+  caddy_config:
