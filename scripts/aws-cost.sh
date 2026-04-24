@@ -11,6 +11,13 @@
 
 set -euo pipefail
 
+if ! command -v aws >/dev/null 2>&1; then
+    echo "ERROR: 'aws' not found on PATH." >&2
+    echo "  Install: https://aws.amazon.com/cli/" >&2
+    echo "  On Windows/Git Bash, if just installed, open a new shell so PATH refreshes." >&2
+    exit 1
+fi
+
 REGION="${AWS_REGION:-ap-northeast-1}"
 CE_REGION="us-east-1"
 

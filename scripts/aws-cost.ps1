@@ -11,6 +11,28 @@
 
 $ErrorActionPreference = 'Continue'
 
+# Locate aws.exe. A fresh install appends to the Machine PATH, but the
+# current PowerShell process inherits the old env — so Get-Command may
+# miss it until a new shell is opened. Fall back to standard install
+# paths so the script just works.
+$awsCmd = Get-Command aws -ErrorAction SilentlyContinue
+if (-not $awsCmd) {
+    $candidates = @(
+        "$env:ProgramFiles\Amazon\AWSCLIV2\aws.exe",
+        "${env:ProgramFiles(x86)}\Amazon\AWSCLIV2\aws.exe"
+    )
+    foreach ($p in $candidates) {
+        if (Test-Path $p) { Set-Alias -Name aws -Value $p -Scope Script; $awsCmd = $p; break }
+    }
+}
+if (-not $awsCmd) {
+    Write-Host "ERROR: 'aws' not found on PATH and not at standard install paths." -ForegroundColor Red
+    Write-Host "  Install: https://aws.amazon.com/cli/"
+    Write-Host "  If just installed, open a new PowerShell OR run:"
+    Write-Host '    $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")'
+    exit 1
+}
+
 $Region   = if ($env:AWS_REGION) { $env:AWS_REGION } else { 'ap-northeast-1' }
 $CeRegion = 'us-east-1'
 
