@@ -10,6 +10,7 @@ of transport.
 """
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -17,6 +18,8 @@ from core.board import Color
 from core.game import GameState, MoveOutcome
 from core.scoring import area_score
 from protocol.messages import view_to_dict
+
+DEFAULT_TURN_TIMEOUT_SECONDS = 20.0
 
 
 class Connection(ABC):
@@ -35,6 +38,7 @@ class GameSession:
         white: Connection,
         black_name: str = "",
         white_name: str = "",
+        turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
     ) -> None:
         self.conns: dict[Color, Connection] = {Color.BLACK: black, Color.WHITE: white}
         self.names: dict[Color, str] = {
@@ -42,6 +46,7 @@ class GameSession:
             Color.WHITE: white_name,
         }
         self.game = GameState()
+        self.turn_timeout_seconds = turn_timeout_seconds
 
     async def run(self) -> None:
         """Drive the game to completion. Sends welcome messages first."""
@@ -69,6 +74,7 @@ class GameSession:
                     "type": "your_turn",
                     "view": view_to_dict(self.game.view(current)),
                     "losses_since_last_turn": losses,
+                    "turn_deadline_seconds": self.turn_timeout_seconds,
                 }
             )
             cont = await self._handle_turn(current, conn)
@@ -82,9 +88,20 @@ class GameSession:
 
         Returns False if the game must abort (disconnect/resign), True
         otherwise (including normal end-of-game via two passes).
+
+        The 20 s budget is cumulative over all attempts in this turn — an
+        opponent who floods illegal moves can't buy extra time.
         """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.turn_timeout_seconds
         while True:
-            msg = await conn.recv()
+            remaining = max(0.001, deadline - loop.time())
+            try:
+                msg = await asyncio.wait_for(conn.recv(), timeout=remaining)
+            except asyncio.TimeoutError:
+                self.game.pass_turn(current)
+                await conn.send({"type": "turn_timeout"})
+                return True
             if msg is None:
                 await self._broadcast_game_end(ended_by="disconnect", resigner=current)
                 return False

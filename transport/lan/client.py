@@ -159,6 +159,9 @@ async def _input_loop(reader, writer, my_color: Color | None) -> bool:
         if rt == "passed":
             print("  You passed.")
             return True
+        if rt == "turn_timeout":
+            print("  Turn timed out — auto-passed.")
+            return True
         if rt == "game_end":
             _print_game_end(reply)
             return False

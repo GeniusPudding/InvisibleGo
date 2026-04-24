@@ -19,6 +19,9 @@ let myTurn = false;
 let ws = null;
 let pendingPlay = null;
 let myName = "";
+let turnTimer = null;
+let turnDeadlineTs = null;
+let gameHasEnded = false;
 
 // Screens
 const lobbyScreen = document.getElementById("lobby");
@@ -48,6 +51,9 @@ const infoEl = document.getElementById("info");
 const messageEl = document.getElementById("message");
 const passBtn = document.getElementById("pass-btn");
 const resignBtn = document.getElementById("resign-btn");
+const backToLobbyBtn = document.getElementById("back-to-lobby-btn");
+const timerEl = document.getElementById("timer");
+const timerValueEl = document.getElementById("timer-value");
 
 function show(screen) {
   lobbyScreen.classList.toggle("hidden", screen !== "lobby");
@@ -194,6 +200,59 @@ function setTurnControls(on) {
   statusEl.textContent = on ? "Your turn." : "Waiting for opponent...";
 }
 
+function startTurnTimer(seconds) {
+  stopTurnTimer();
+  turnDeadlineTs = Date.now() + seconds * 1000;
+  timerEl.classList.remove("hidden");
+  renderTimer();
+  turnTimer = setInterval(renderTimer, 250);
+}
+
+function renderTimer() {
+  if (turnDeadlineTs === null) return;
+  const remaining = Math.max(0, Math.ceil((turnDeadlineTs - Date.now()) / 1000));
+  timerValueEl.textContent = remaining;
+  timerEl.classList.toggle("urgent", remaining <= 5);
+  if (remaining <= 0) {
+    clearInterval(turnTimer);
+    turnTimer = null;
+  }
+}
+
+function stopTurnTimer() {
+  if (turnTimer !== null) {
+    clearInterval(turnTimer);
+    turnTimer = null;
+  }
+  turnDeadlineTs = null;
+  timerEl.classList.add("hidden");
+  timerEl.classList.remove("urgent");
+}
+
+function resetToLobby() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.close();
+  }
+  ws = null;
+  myColor = null;
+  myTurn = false;
+  pendingPlay = null;
+  gameHasEnded = false;
+  stopTurnTimer();
+  backToLobbyBtn.classList.add("hidden");
+  setTurnControls(false);
+  setMessage("", null);
+  showLobbyError("");
+  statusEl.textContent = "";
+  infoEl.innerHTML = "";
+  colorLabel.textContent = "";
+  colorLabel.removeAttribute("style");
+  opponentLabel.textContent = "";
+  show("lobby");
+}
+
+backToLobbyBtn.addEventListener("click", resetToLobby);
+
 // --- Lobby ---
 
 function getName() {
@@ -205,8 +264,13 @@ function openSocket() {
   const s = new WebSocket(`${proto}//${location.host}/ws`);
   s.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
   s.onclose = () => {
+    if (gameHasEnded) {
+      // Game ended normally; server closed the ws on purpose. No error shown.
+      return;
+    }
     if (gameScreen.classList.contains("hidden")) {
       // Still in lobby / waiting — tell the user
+      if (!lobbyScreen.classList.contains("hidden")) return;  // already back
       showLobbyError("Connection closed.");
       show("lobby");
     } else {
@@ -321,6 +385,9 @@ function handleMessage(msg) {
       } else {
         setMessage("Your turn. Click an intersection to play.", "ok");
       }
+      if (msg.turn_deadline_seconds) {
+        startTurnTimer(msg.turn_deadline_seconds);
+      }
       break;
     }
 
@@ -332,9 +399,11 @@ function handleMessage(msg) {
           "error"
         );
         setTurnControls(true);
+        // Timer keeps running — the turn budget is shared across retries
       } else {
         setMessage("Three illegal attempts. Turn auto-skipped.", "error");
         setTurnControls(false);
+        stopTurnTimer();
       }
       break;
 
@@ -350,16 +419,27 @@ function handleMessage(msg) {
         "ok"
       );
       setTurnControls(false);
+      stopTurnTimer();
       break;
 
     case "passed":
       setMessage("You passed.", "ok");
       setTurnControls(false);
+      stopTurnTimer();
+      break;
+
+    case "turn_timeout":
+      pendingPlay = null;
+      setMessage("You ran out of time. Turn auto-passed.", "error");
+      setTurnControls(false);
+      stopTurnTimer();
       break;
 
     case "game_end": {
+      gameHasEnded = true;
       renderStones(msg.full_board, true);
       setTurnControls(false);
+      stopTurnTimer();
       let result = msg.winner ? `${msg.winner} wins.` : "Draw.";
       if (msg.ended_by === "resign") result += ` (${msg.resigner} resigned.)`;
       if (msg.ended_by === "disconnect") result += ` (${msg.resigner} disconnected.)`;
@@ -371,6 +451,7 @@ function handleMessage(msg) {
       `;
       setMessage("Full board revealed.", "ok");
       statusEl.textContent = "Game over.";
+      backToLobbyBtn.classList.remove("hidden");
       break;
     }
 

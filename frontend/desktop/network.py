@@ -28,6 +28,7 @@ class NetworkClient(QObject):
     illegal = Signal(int)
     played = Signal(int)
     passed = Signal()
+    turn_timeout = Signal()
     game_end = Signal(dict)
     error = Signal(str)
     disconnected = Signal()
@@ -131,6 +132,8 @@ class NetworkClient(QObject):
             self.played.emit(int(msg.get("captured", 0)))
         elif t == "passed":
             self.passed.emit()
+        elif t == "turn_timeout":
+            self.turn_timeout.emit()
         elif t == "game_end":
             self.game_end.emit(msg)
         elif t == "error":

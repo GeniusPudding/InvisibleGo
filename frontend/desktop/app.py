@@ -90,6 +90,7 @@ class MainWindow(QMainWindow):
         self.client.illegal.connect(self._on_illegal)
         self.client.played.connect(self._on_played)
         self.client.passed.connect(self._on_passed)
+        self.client.turn_timeout.connect(self._on_turn_timeout)
         self.client.game_end.connect(self._on_game_end)
         self.client.error.connect(self._on_error)
         self.client.disconnected.connect(self._on_disconnected)
@@ -180,6 +181,15 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_passed(self) -> None:
         self.panel.append_log("You passed.", "ok")
+        self.board.set_my_turn(False)
+        self.panel.set_my_turn(False)
+        self.panel.set_status("Waiting for opponent...")
+        self.statusBar().showMessage("Waiting for opponent...")
+
+    @Slot()
+    def _on_turn_timeout(self) -> None:
+        self._pending_play = None
+        self.panel.append_log("Turn timed out — auto-passed.", "warn")
         self.board.set_my_turn(False)
         self.panel.set_my_turn(False)
         self.panel.set_status("Waiting for opponent...")

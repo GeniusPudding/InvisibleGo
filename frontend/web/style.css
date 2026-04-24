@@ -126,7 +126,16 @@ button:not(:disabled):hover { background: var(--accent); color: white; }
 #color-label { font-size: 1.25rem; font-weight: 600; padding: 6px 10px; border-radius: 4px; background: #ddd; text-align: center; }
 #opponent-label { color: #555; font-style: italic; text-align: center; }
 #info { line-height: 1.6; }
-#controls { display: flex; gap: 8px; }
+#controls { display: flex; gap: 8px; flex-wrap: wrap; }
+#timer {
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: 1.1rem;
+  padding: 6px 10px;
+  background: #fff3cd;
+  border-left: 4px solid #d4a017;
+  border-radius: 2px;
+}
+#timer.urgent { background: #f8d7da; border-color: #c33; color: #c33; }
 #message {
   padding: 10px 12px;
   background: #fff3cd;

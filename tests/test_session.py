@@ -93,6 +93,34 @@ async def test_view_hides_opponent_stones_in_protocol():
 
 
 @pytest.mark.asyncio
+async def test_turn_timeout_auto_passes():
+    black, white = FakeConn(), FakeConn()
+    session = GameSession(black=black, white=white, turn_timeout_seconds=0.05)
+    # Black does not send anything → times out and gets auto-passed
+    # White then passes voluntarily → two consecutive passes, game ends
+    await white.inbox.put({"type": "pass"})
+    await session.run()
+
+    # Black should have received the turn_timeout notice
+    assert any(m["type"] == "turn_timeout" for m in black.outbox)
+    # White's pass ended the game (2 consecutive passes), so both receive game_end
+    # (no per-pass confirmation is sent when the pass happens to close the game)
+    assert any(m["type"] == "game_end" for m in black.outbox)
+    assert any(m["type"] == "game_end" for m in white.outbox)
+
+
+@pytest.mark.asyncio
+async def test_your_turn_includes_turn_deadline():
+    black, white = FakeConn(), FakeConn()
+    session = GameSession(black=black, white=white, turn_timeout_seconds=42.0)
+    await black.inbox.put({"type": "pass"})
+    await white.inbox.put({"type": "pass"})
+    await session.run()
+    yt = [m for m in black.outbox if m["type"] == "your_turn"][0]
+    assert yt["turn_deadline_seconds"] == 42.0
+
+
+@pytest.mark.asyncio
 async def test_resign_ends_game_with_opponent_winner():
     black, white = FakeConn(), FakeConn()
     session = GameSession(black=black, white=white)
