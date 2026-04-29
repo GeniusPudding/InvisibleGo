@@ -50,6 +50,13 @@ class GameState:
     pending_losses: dict[Color, int] = field(
         default_factory=lambda: {Color.BLACK: 0, Color.WHITE: 0}
     )
+    last_move: dict[Color, Point | None] = field(
+        default_factory=lambda: {Color.BLACK: None, Color.WHITE: None}
+    )
+    # Ordered list of every legal play, in execution order. Used to
+    # number stones (move ordinals) in views and snapshots. Passes are
+    # not recorded.
+    move_history: list[tuple[Color, Point]] = field(default_factory=list)
     is_over: bool = False
 
     def __post_init__(self) -> None:
@@ -95,6 +102,8 @@ class GameState:
         self.consecutive_passes = 0
         self.to_move = opp
         self.attempts_remaining = MAX_ATTEMPTS_PER_TURN
+        self.last_move[color] = p
+        self.move_history.append((color, p))
         return MoveResult(
             outcome=MoveOutcome.OK,
             captured_count=len(captured),
@@ -125,6 +134,15 @@ class GameState:
         return n
 
     def view(self, perspective: Color) -> PlayerView:
+        # For each surviving own stone, the latest move ordinal at which
+        # the perspective player placed it. Captures + replays mean the
+        # same point can have multiple entries in move_history; later
+        # iterations overwrite earlier ones, so the dict ends up holding
+        # only the move number that produced the *currently* visible stone.
+        own_move_numbers: dict[Point, int] = {}
+        for i, (c, p) in enumerate(self.move_history, start=1):
+            if c is perspective and self.board.at(p) is perspective:
+                own_move_numbers[p] = i
         return build_view(
             board=self.board,
             perspective=perspective,
@@ -133,6 +151,8 @@ class GameState:
             total_captured_by_me=self.captured_by[perspective],
             total_lost_by_me=self.captured_by[perspective.opponent()],
             is_over=self.is_over,
+            last_own_move=self.last_move[perspective],
+            own_move_numbers=own_move_numbers,
         )
 
     def _record_illegal(self) -> MoveResult:

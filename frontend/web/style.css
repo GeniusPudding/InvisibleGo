@@ -157,6 +157,18 @@ button:not(:disabled):hover { background: var(--accent); color: white; }
 .stone { pointer-events: none; }
 .stone.black { fill: #111; stroke: #000; stroke-width: 1; }
 .stone.white { fill: #f8f8f8; stroke: #111; stroke-width: 1; }
+.last-move-marker { pointer-events: none; }
+.last-move-marker.on-black { fill: #ff5a38; stroke: #7a2010; stroke-width: 1; }
+.last-move-marker.on-white { fill: #c62828; stroke: #4a0d0d; stroke-width: 1; }
+.stone-num {
+  font-family: "Consolas", "Menlo", monospace;
+  font-size: 14px;
+  font-weight: bold;
+  pointer-events: none;
+  dominant-baseline: middle;
+}
+.stone-num.on-black { fill: #fff; }
+.stone-num.on-white { fill: #000; }
 .coord {
   fill: var(--board-line);
   font: 12px system-ui, sans-serif;

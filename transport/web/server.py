@@ -28,7 +28,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from transport.session import Connection, GameSession
+from transport.session import Connection, run_match_series
 from transport.web.matchmaker import Matchmaker, RoomNotFound
 
 log = logging.getLogger("invisiblego.web")
@@ -73,13 +73,12 @@ async def _run_game_session(
     white_ws: WebSocket,
     white_name: str,
 ) -> None:
-    session = GameSession(
+    await run_match_series(
         black=WsConnection(black_ws),
         white=WsConnection(white_ws),
         black_name=black_name,
         white_name=white_name,
     )
-    await session.run()
 
 
 matchmaker = Matchmaker(session_runner=_run_game_session)

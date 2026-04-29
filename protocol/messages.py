@@ -86,4 +86,8 @@ def view_to_dict(view: PlayerView) -> dict[str, Any]:
         "attempts_remaining": view.attempts_remaining,
         "total_captured_by_me": view.total_captured_by_me,
         "total_lost_by_me": view.total_lost_by_me,
+        "last_own_move": (
+            list(view.last_own_move) if view.last_own_move is not None else None
+        ),
+        "own_move_numbers": [list(t) for t in view.own_move_numbers],
     }

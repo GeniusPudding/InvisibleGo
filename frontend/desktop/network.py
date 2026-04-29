@@ -30,6 +30,7 @@ class NetworkClient(QObject):
     passed = Signal()
     turn_timeout = Signal()
     game_end = Signal(dict)
+    rematch_declined = Signal()
     error = Signal(str)
     disconnected = Signal()
     connected = Signal()
@@ -136,6 +137,8 @@ class NetworkClient(QObject):
             self.turn_timeout.emit()
         elif t == "game_end":
             self.game_end.emit(msg)
+        elif t == "rematch_declined":
+            self.rematch_declined.emit()
         elif t == "error":
             self.error.emit(str(msg.get("message", "")))
 
@@ -159,3 +162,6 @@ class NetworkClient(QObject):
 
     def send_resign(self) -> None:
         self._send({"type": "resign"})
+
+    def send_rematch(self, agree: bool) -> None:
+        self._send({"type": "rematch", "agree": agree})

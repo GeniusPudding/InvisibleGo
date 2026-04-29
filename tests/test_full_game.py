@@ -15,11 +15,28 @@ uses.
 from __future__ import annotations
 
 import asyncio
+import copy
+import random
 from typing import Any, Iterable
 
 from core.board import BOARD_SIZE, Board, Color
+from core.game import GameState, MoveOutcome
 from core.scoring import area_score
-from transport.session import Connection, GameSession
+from tests.snapshot import write_snapshot
+from transport.session import Connection, GameSession, run_match_series
+
+
+def _save_session_snapshot(name: str, session: GameSession, end_msg: dict) -> None:
+    score_line = (
+        f"BLACK {end_msg.get('black_score')} - {end_msg.get('white_score')} WHITE"
+        f"   ({end_msg.get('winner') or 'tie'})"
+    )
+    write_snapshot(
+        name=name,
+        stones=session.game.board.stones,
+        move_history=session.game.move_history,
+        score_line=score_line,
+    )
 
 
 # --- fake connection + helpers --------------------------------------------
@@ -151,6 +168,7 @@ async def test_territory_split_white_wins_by_9():
     assert end["winner"] == "WHITE"
     assert end["ended_by"] == "pass"
     assert game_end_of(white) == end  # both sides see the same payload
+    _save_session_snapshot("territory_split_white_wins_by_9", session, end)
 
 
 async def test_corner_capture_then_score():
@@ -181,6 +199,7 @@ async def test_corner_capture_then_score():
     assert end["white_score"] == 1   # 1 stone, no territory
     assert end["winner"] == "BLACK"
     assert end["ended_by"] == "pass"
+    _save_session_snapshot("corner_capture_then_score", session, end)
 
 
 async def test_ko_attempt_illegal_then_resolve_and_score():
@@ -236,6 +255,7 @@ async def test_ko_attempt_illegal_then_resolve_and_score():
     # full frontier, but black must be winning (more stones, more
     # surrounding influence and a corner stone).
     assert end["winner"] == "BLACK"
+    _save_session_snapshot("ko_attempt_illegal_then_resolve_and_score", session, end)
 
 
 async def test_auto_skip_on_own_turn_counts_toward_double_pass():
@@ -261,6 +281,7 @@ async def test_auto_skip_on_own_turn_counts_toward_double_pass():
     # The auto-skip's 3rd illegal must report zero attempts remaining.
     illegals = [m for m in black.outbox if m["type"] == "illegal"]
     assert illegals[-1]["attempts_remaining"] == 0
+    _save_session_snapshot("auto_skip_on_own_turn", session, end)
 
 
 async def test_resign_gives_opponent_the_win_even_when_behind():
@@ -279,6 +300,216 @@ async def test_resign_gives_opponent_the_win_even_when_behind():
     # reveals everything (otherwise scoring would be unverifiable).
     revealed = end["full_board"]
     assert any(v == Color.BLACK.value for v in revealed)
+    _save_session_snapshot("resign_gives_opponent_the_win", session, end)
+
+
+async def test_mirror_l_shapes_tie_with_nonrectangular_territory():
+    """Two mirror L-shaped walls create equal 6-point territories.
+
+    Final board (X=black, O=white):
+        X X X . . . . . .
+        . . X . . . . . .
+        . . X . . . . . .
+        . . X . . . . . .
+        X X X . . . O O O
+        . . . . . . O . .
+        . . . . . . O . .
+        . . . . . . O . .
+        . . . . . . O O O
+
+    Black's L encloses 6 points in the top-left corner; white's mirror L
+    encloses 6 points in the bottom-right corner. Everything else is
+    dame (touches both colors). This exercises the area-scoring flood
+    fill on non-rectangular regions — all earlier tests used rectangular
+    walls where a bug in region shape handling wouldn't show up.
+
+    Black stones 9 + territory 6 = 15. Same for white. Tie.
+    """
+    black_script = [
+        play(0, 0), play(0, 1), play(0, 2),
+        play(1, 2), play(2, 2), play(3, 2),
+        play(4, 2), play(4, 1), play(4, 0),
+        pass_(),
+    ]
+    white_script = [
+        play(8, 8), play(8, 7), play(8, 6),
+        play(7, 6), play(6, 6), play(5, 6),
+        play(4, 6), play(4, 7), play(4, 8),
+        pass_(),
+    ]
+    session, black, white = await run_scripted(black_script, white_script)
+    end = game_end_of(black)
+    print(dump_endgame(session, end))
+
+    assert end["black_score"] == 15
+    assert end["white_score"] == 15
+    assert end["winner"] is None
+    _save_session_snapshot("mirror_l_shapes_tie", session, end)
+
+
+def _first_legal_move(
+    game: GameState, color: Color, candidates: Iterable[tuple[int, int]]
+) -> tuple[int, int] | None:
+    """Non-mutating legality probe: returns first candidate that would
+    play() legally. Uses deepcopy so the real GameState is untouched."""
+    for p in candidates:
+        trial = copy.deepcopy(game)
+        if trial.play(color, p).outcome is MoveOutcome.OK:
+            return p
+    return None
+
+
+async def test_random_play_always_terminates_with_valid_score():
+    """Two random bots play to termination on the core engine, with a
+    rising pass-bias so the game actually converges to an endgame
+    instead of looping through capture-recapture indefinitely.
+
+    Schedule: for the first 60 turns, always play a random legal move.
+    From turn 60 to 120, probability of passing rises linearly from 0 to
+    1. After turn 120, always pass — the engine will then hit
+    consecutive_passes==2 and terminate.
+
+    The test asserts:
+      1. the game reaches is_over,
+      2. Chinese area scoring returns non-negative scores that sum
+         to at most 81 (dame >= 0),
+      3. the scoring winner agrees with the raw numbers.
+
+    This is a stress test for the rules engine (captures, ko, suicide)
+    under arbitrary move orders. It drives GameState directly, dodging
+    the per-turn timer and 3-attempt budget.
+    """
+    for seed in range(5):
+        rng = random.Random(seed)
+        game = GameState()
+        max_turns = 200
+        play_phase_end = 60
+        pass_phase_end = 120
+
+        for turn in range(max_turns):
+            if game.is_over:
+                break
+            color = game.to_move
+
+            # Rising pass-bias → termination.
+            if turn >= pass_phase_end:
+                pass_bias = 1.0
+            elif turn >= play_phase_end:
+                pass_bias = (turn - play_phase_end) / (pass_phase_end - play_phase_end)
+            else:
+                pass_bias = 0.0
+
+            if rng.random() < pass_bias:
+                game.pass_turn(color)
+                continue
+
+            empties = [
+                (r, c)
+                for r in range(BOARD_SIZE)
+                for c in range(BOARD_SIZE)
+                if game.board.at((r, c)) is Color.EMPTY
+            ]
+            rng.shuffle(empties)
+            legal = _first_legal_move(game, color, empties[:10])
+            if legal is None:
+                game.pass_turn(color)
+            else:
+                game.play(color, legal)
+
+        assert game.is_over, f"seed={seed}: game did not terminate in {max_turns} turns"
+        score = area_score(game.board)
+        # Every one of the 81 points is either a stone, own-bordered
+        # territory, or dame. Dame = 81 - black_score - white_score.
+        dame = BOARD_SIZE * BOARD_SIZE - score.black - score.white
+        assert 0 <= dame <= BOARD_SIZE * BOARD_SIZE, (
+            f"seed={seed}: invalid dame count {dame}"
+        )
+        assert 0 <= score.black <= BOARD_SIZE * BOARD_SIZE
+        assert 0 <= score.white <= BOARD_SIZE * BOARD_SIZE
+        # Winner must agree with the raw numbers.
+        if score.black > score.white:
+            assert score.winner is Color.BLACK
+        elif score.white > score.black:
+            assert score.winner is Color.WHITE
+        else:
+            assert score.winner is None
+        winner_name = score.winner.name if score.winner is not None else "tie"
+        write_snapshot(
+            name=f"random_play_seed_{seed}",
+            stones=game.board.stones,
+            move_history=game.move_history,
+            score_line=(
+                f"BLACK {score.black} - {score.white} WHITE   ({winner_name})"
+                f"   moves={len(game.move_history)} dame={dame}"
+            ),
+        )
+
+
+async def test_rematch_two_full_games_both_scored():
+    """Drive `run_match_series` through two complete territorial games.
+
+    Game 1: BLACK=FakeConn#1 plays col 2, WHITE=FakeConn#2 plays col 5,
+            both pass. Expect black=27, white=36.
+    Rematch accepted by both → colors swap.
+    Game 2: BLACK=FakeConn#2 plays col 2, WHITE=FakeConn#1 plays col 5,
+            both pass. Expect black=27, white=36 *from the new roles*.
+    Both decline the second rematch → series ends.
+
+    This asserts the rematch path actually replays full scoring-phase
+    games — not just the pass-pass sentinel end that test_session.py
+    uses. It also checks the game_end payload is correct per game.
+    """
+    black_conn, white_conn = FakeConn(), FakeConn()
+
+    # Game 1 moves, per role. Queue goes into whichever FakeConn plays
+    # that role for that game.
+    col2_wall = [play(r, 2) for r in range(BOARD_SIZE)] + [pass_()]
+    col5_wall = [play(r, 5) for r in range(BOARD_SIZE)] + [pass_()]
+
+    # Game 1: black_conn=BLACK (col 2), white_conn=WHITE (col 5)
+    for m in col2_wall: await black_conn.inbox.put(m)
+    for m in col5_wall: await white_conn.inbox.put(m)
+    # Rematch 1: both agree
+    await black_conn.inbox.put({"type": "rematch", "agree": True})
+    await white_conn.inbox.put({"type": "rematch", "agree": True})
+    # Game 2: colors swapped → white_conn is now BLACK (col 2),
+    # black_conn is now WHITE (col 5).
+    for m in col2_wall: await white_conn.inbox.put(m)
+    for m in col5_wall: await black_conn.inbox.put(m)
+    # Rematch 2: both decline → series ends
+    await black_conn.inbox.put({"type": "rematch", "agree": False})
+    await white_conn.inbox.put({"type": "rematch", "agree": False})
+
+    await asyncio.wait_for(
+        run_match_series(
+            black=black_conn, white=white_conn,
+            black_name="P1", white_name="P2",
+            rematch_timeout_seconds=2.0,
+        ),
+        timeout=10.0,
+    )
+
+    game_ends_black = [m for m in black_conn.outbox if m["type"] == "game_end"]
+    game_ends_white = [m for m in white_conn.outbox if m["type"] == "game_end"]
+    assert len(game_ends_black) == 2
+    assert len(game_ends_white) == 2
+    # Both sides see identical payloads for each game.
+    for ge_b, ge_w in zip(game_ends_black, game_ends_white):
+        assert ge_b == ge_w
+
+    # Game 1: BLACK wall on col 2 (27 pts), WHITE wall on col 5 (36 pts)
+    g1 = game_ends_black[0]
+    assert g1["black_score"] == 27
+    assert g1["white_score"] == 36
+    assert g1["winner"] == "WHITE"
+
+    # Game 2: same walls, but colors swapped. In game 2, the "BLACK" role
+    # (white_conn) plays col 2, "WHITE" role (black_conn) plays col 5.
+    # So the game_end payload still reports black_score=27, white_score=36.
+    g2 = game_ends_black[1]
+    assert g2["black_score"] == 27
+    assert g2["white_score"] == 36
+    assert g2["winner"] == "WHITE"
 
 
 async def test_symmetric_split_is_tie():
@@ -299,3 +530,4 @@ async def test_symmetric_split_is_tie():
     assert end["black_score"] == 36
     assert end["white_score"] == 36
     assert end["winner"] is None
+    _save_session_snapshot("symmetric_split_tie", session, end)

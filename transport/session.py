@@ -20,6 +20,7 @@ from core.scoring import area_score
 from protocol.messages import view_to_dict
 
 DEFAULT_TURN_TIMEOUT_SECONDS = 20.0
+DEFAULT_REMATCH_DECISION_SECONDS = 30.0
 
 
 class Connection(ABC):
@@ -47,6 +48,9 @@ class GameSession:
         }
         self.game = GameState()
         self.turn_timeout_seconds = turn_timeout_seconds
+        # Set by _broadcast_game_end so callers (e.g. run_match_series) can
+        # tell whether a rematch is even possible.
+        self.ended_by: str | None = None
 
     async def run(self) -> None:
         """Drive the game to completion. Sends welcome messages first."""
@@ -158,9 +162,74 @@ class GameSession:
             "winner": winner,
             "ended_by": ended_by,
             "resigner": resigner.name if resigner else None,
+            # Full ordered move list — only revealed at game end since the
+            # opponent's positions are no longer secret. Each entry is
+            # [color_name, row, col].
+            "move_history": [
+                [c.name, r, col] for (c, (r, col)) in self.game.move_history
+            ],
         }
+        self.ended_by = ended_by
         for conn in self.conns.values():
             try:
                 await conn.send(payload)
             except Exception:
                 pass
+
+
+async def _await_rematch(conn: Connection, timeout: float) -> bool:
+    """Return True iff the client sent a rematch-agree within the timeout.
+
+    Any other message, a decline, a timeout, or a disconnect counts as 'no'.
+    """
+    try:
+        msg = await asyncio.wait_for(conn.recv(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return False
+    if msg is None:
+        return False
+    return msg.get("type") == "rematch" and bool(msg.get("agree", True))
+
+
+async def run_match_series(
+    black: Connection,
+    white: Connection,
+    black_name: str = "",
+    white_name: str = "",
+    turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
+    rematch_timeout_seconds: float = DEFAULT_REMATCH_DECISION_SECONDS,
+) -> None:
+    """Play a series of games; after each, offer both sides a rematch.
+
+    When both sides agree, colors are swapped for fairness and a fresh
+    GameSession runs. Any other outcome (one declines, one disconnects,
+    either times out) ends the series.
+    """
+    while True:
+        session = GameSession(
+            black=black,
+            white=white,
+            black_name=black_name,
+            white_name=white_name,
+            turn_timeout_seconds=turn_timeout_seconds,
+        )
+        await session.run()
+        if session.ended_by == "disconnect":
+            return
+        decisions = await asyncio.gather(
+            _await_rematch(black, rematch_timeout_seconds),
+            _await_rematch(white, rematch_timeout_seconds),
+        )
+        if all(decisions):
+            # Swap colors so the prior WHITE plays first next round.
+            black, white = white, black
+            black_name, white_name = white_name, black_name
+            continue
+        # Notify any side that agreed that the rematch won't happen.
+        for conn, agreed in zip((black, white), decisions):
+            if agreed:
+                try:
+                    await conn.send({"type": "rematch_declined"})
+                except Exception:
+                    pass
+        return

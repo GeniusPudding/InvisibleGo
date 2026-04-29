@@ -60,9 +60,48 @@ class BoardWidget(QWidget):
         self._stones = [EMPTY] * (BOARD_SIZE * BOARD_SIZE)
         self._my_turn = False
         self._hover: tuple[int, int] | None = None
+        self._last_own_move: tuple[int, int] | None = None
+        self._my_color: int = EMPTY
+        # Numbered overlay state. _own_numbers maps surviving own stone
+        # positions to their absolute move ordinal (during play). At game
+        # end _full_history holds (color_name, r, c) for every play; the
+        # widget folds it into a per-position map at paint time.
+        self._show_numbers: bool = False
+        self._own_numbers: dict[tuple[int, int], int] = {}
+        self._full_history: list[tuple[str, int, int]] = []
 
     def set_stones(self, stones) -> None:
         self._stones = list(stones)
+        self.update()
+
+    def set_last_own_move(self, pos: tuple[int, int] | None) -> None:
+        self._last_own_move = pos
+        self.update()
+
+    def set_my_color(self, color: int) -> None:
+        self._my_color = color
+        self.update()
+
+    def set_own_move_numbers(self, entries) -> None:
+        """entries: iterable of [r, c, n] from server during play."""
+        self._own_numbers = {(int(r), int(c)): int(n) for r, c, n in (entries or [])}
+        self.update()
+
+    def set_full_move_history(self, entries) -> None:
+        """entries: iterable of [color_name, r, c] from game_end."""
+        self._full_history = [
+            (str(name), int(r), int(c)) for name, r, c in (entries or [])
+        ]
+        self.update()
+
+    def set_show_numbers(self, on: bool) -> None:
+        self._show_numbers = bool(on)
+        self.update()
+
+    def reset_for_new_game(self) -> None:
+        self._own_numbers = {}
+        self._full_history = []
+        self._last_own_move = None
         self.update()
 
     def place_stone(self, r: int, c: int, color: int) -> None:
@@ -73,6 +112,7 @@ class BoardWidget(QWidget):
         for the next `your_turn` view.
         """
         self._stones[r * BOARD_SIZE + c] = color
+        self._last_own_move = (r, c)
         self.update()
 
     def set_my_turn(self, on: bool) -> None:
@@ -159,6 +199,21 @@ class BoardWidget(QWidget):
                 if v != EMPTY:
                     self._draw_stone(p, r, c, v)
 
+        # Last-own-move marker: a small colored dot on top of the stone,
+        # so the player can immediately tell which one was theirs.
+        if self._last_own_move is not None and self._my_color != EMPTY:
+            r, c = self._last_own_move
+            idx = r * BOARD_SIZE + c
+            if 0 <= idx < len(self._stones) and self._stones[idx] == self._my_color:
+                cx, cy = self._intersection_xy(r, c)
+                p.setBrush(QColor("#ff5a38"))
+                p.setPen(QPen(QColor("#7a2010"), 1))
+                p.drawEllipse(QPointF(cx, cy), self.CELL * 0.12, self.CELL * 0.12)
+
+        # Move-number overlay (toggle).
+        if self._show_numbers:
+            self._draw_move_numbers(p)
+
         # Hover indicator on empty intersections during your turn
         if self._hover is not None and self._my_turn:
             r, c = self._hover
@@ -171,6 +226,43 @@ class BoardWidget(QWidget):
                     self.CELL * 0.42,
                     self.CELL * 0.42,
                 )
+
+    def _draw_move_numbers(self, p: QPainter) -> None:
+        # Build (r, c) -> (ordinal, expected_color_int).
+        #   - During play: server sends our own moves in `_own_numbers`.
+        #   - At game end: server sends `_full_history` covering both colors.
+        # Capture-and-replay shapes: later entries overwrite earlier ones,
+        # so the dict ends up with whichever stone is currently visible.
+        numbered: dict[tuple[int, int], tuple[int, int]] = {}
+        if self._full_history:
+            for i, (name, r, c) in enumerate(self._full_history, start=1):
+                expected = BLACK if name == "BLACK" else WHITE
+                numbered[(r, c)] = (i, expected)
+        elif self._own_numbers and self._my_color != EMPTY:
+            for (r, c), n in self._own_numbers.items():
+                numbered[(r, c)] = (n, self._my_color)
+
+        if not numbered:
+            return
+        font = QFont()
+        font.setPointSize(11)
+        font.setBold(True)
+        p.setFont(font)
+        from PySide6.QtCore import QRectF
+        size = self.CELL * 0.7
+        for (r, c), (n, expected) in numbered.items():
+            idx = r * BOARD_SIZE + c
+            if not (0 <= idx < len(self._stones)):
+                continue
+            v = self._stones[idx]
+            if v == EMPTY or v != expected:
+                # Stone gone (capture) or replaced by other color: stale.
+                continue
+            cx, cy = self._intersection_xy(r, c)
+            text_color = QColor("#fff") if v == BLACK else QColor("#000")
+            p.setPen(QPen(text_color))
+            rect = QRectF(cx - size / 2, cy - size / 2, size, size)
+            p.drawText(rect, Qt.AlignCenter, str(n))
 
     def _draw_stone(self, p: QPainter, r: int, c: int, color: int) -> None:
         cx, cy = self._intersection_xy(r, c)
@@ -223,6 +315,8 @@ class BoardWidget(QWidget):
 class SidePanel(QWidget):
     pass_clicked = Signal()
     resign_clicked = Signal()
+    rematch_clicked = Signal()
+    show_numbers_toggled = Signal(bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -262,8 +356,16 @@ class SidePanel(QWidget):
         self.resign_btn = QPushButton("Resign")
         self.resign_btn.setEnabled(False)
         self.resign_btn.clicked.connect(self.resign_clicked.emit)
+        self.rematch_btn = QPushButton("Rematch")
+        self.rematch_btn.setVisible(False)
+        self.rematch_btn.clicked.connect(self.rematch_clicked.emit)
+        self.show_numbers_btn = QPushButton("Show #")
+        self.show_numbers_btn.setCheckable(True)
+        self.show_numbers_btn.toggled.connect(self._on_numbers_toggled)
         button_row.addWidget(self.pass_btn)
         button_row.addWidget(self.resign_btn)
+        button_row.addWidget(self.show_numbers_btn)
+        button_row.addWidget(self.rematch_btn)
         button_row.addStretch()
         layout.addLayout(button_row)
 
@@ -275,6 +377,10 @@ class SidePanel(QWidget):
             " font-family: 'Consolas', 'Menlo', monospace; }"
         )
         layout.addWidget(self.log, 1)
+
+    def _on_numbers_toggled(self, on: bool) -> None:
+        self.show_numbers_btn.setText("Hide #" if on else "Show #")
+        self.show_numbers_toggled.emit(on)
 
     def append_log(self, text: str, kind: str = "") -> None:
         color = {"error": "#c33", "ok": "#286f2c", "warn": "#a66100"}.get(
@@ -300,6 +406,10 @@ class SidePanel(QWidget):
     def set_my_turn(self, on: bool) -> None:
         self.pass_btn.setEnabled(on)
         self.resign_btn.setEnabled(on)
+
+    def set_rematch_visible(self, visible: bool, enabled: bool = True) -> None:
+        self.rematch_btn.setVisible(visible)
+        self.rematch_btn.setEnabled(enabled)
 
     def set_state(self, attempts: int, captured: int, lost: int) -> None:
         self.attempts_label.setText(str(attempts))

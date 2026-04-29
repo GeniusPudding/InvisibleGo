@@ -20,6 +20,7 @@ env/
 .ruff_cache/
 .coverage
 htmlcov/
+tests/snapshots/
 
 # IDE / OS
 .vscode/

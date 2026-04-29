@@ -15,7 +15,7 @@ import sys
 from typing import Any
 
 from protocol.messages import read_frame, write_frame
-from transport.session import Connection, GameSession
+from transport.session import Connection, run_match_series
 
 
 class TcpConnection(Connection):
@@ -66,9 +66,8 @@ async def run_server(host: str, port: int) -> int:
 
     async with server:
         await ready.wait()
-        session = GameSession(black=pending[0], white=pending[1])
         try:
-            await session.run()
+            await run_match_series(black=pending[0], white=pending[1])
         finally:
             for conn in pending:
                 await conn.close()

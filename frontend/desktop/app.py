@@ -83,6 +83,8 @@ class MainWindow(QMainWindow):
         self.board.intersection_clicked.connect(self._on_play)
         self.panel.pass_clicked.connect(self._on_pass)
         self.panel.resign_clicked.connect(self._on_resign)
+        self.panel.rematch_clicked.connect(self._on_rematch)
+        self.panel.show_numbers_toggled.connect(self.board.set_show_numbers)
 
         self.client.connected.connect(self._on_connected)
         self.client.welcome.connect(self._on_welcome)
@@ -92,6 +94,7 @@ class MainWindow(QMainWindow):
         self.client.passed.connect(self._on_passed)
         self.client.turn_timeout.connect(self._on_turn_timeout)
         self.client.game_end.connect(self._on_game_end)
+        self.client.rematch_declined.connect(self._on_rematch_declined)
         self.client.error.connect(self._on_error)
         self.client.disconnected.connect(self._on_disconnected)
 
@@ -116,13 +119,26 @@ class MainWindow(QMainWindow):
     @Slot(str)
     def _on_welcome(self, color: str) -> None:
         self.my_color = BLACK if color == "BLACK" else WHITE
+        # Reset per-game state — a second welcome means a rematch started.
+        self._pending_play = None
+        self._captured = 0
+        self._lost = 0
+        self.board.set_stones([0] * (9 * 9))
+        self.board.reset_for_new_game()
+        self.board.set_my_color(self.my_color)
         self.panel.set_color(color)
+        self.panel.set_rematch_visible(False)
         self.panel.set_status("Waiting for opponent / your turn...")
         self.panel.append_log(f"You are {color}.", "ok")
 
     @Slot(dict, int)
     def _on_your_turn(self, view: dict, losses: int) -> None:
         self.board.set_stones(view.get("your_stones", []))
+        last = view.get("last_own_move")
+        self.board.set_last_own_move(
+            tuple(last) if isinstance(last, (list, tuple)) and len(last) == 2 else None
+        )
+        self.board.set_own_move_numbers(view.get("own_move_numbers", []))
         self.board.set_my_turn(True)
         self.panel.set_my_turn(True)
         self._captured = int(view.get("total_captured_by_me", 0))
@@ -138,6 +154,7 @@ class MainWindow(QMainWindow):
                 f"You lost {losses} stone(s) since your last turn.", "warn"
             )
         self.statusBar().showMessage("Your turn.")
+        QApplication.beep()
 
     @Slot(int)
     def _on_illegal(self, attempts: int) -> None:
@@ -198,6 +215,7 @@ class MainWindow(QMainWindow):
     @Slot(dict)
     def _on_game_end(self, msg: dict) -> None:
         self.board.set_stones(msg.get("full_board", []))
+        self.board.set_full_move_history(msg.get("move_history", []))
         self.board.set_my_turn(False)
         self.panel.set_my_turn(False)
         winner = msg.get("winner")
@@ -217,6 +235,24 @@ class MainWindow(QMainWindow):
             )
         self.panel.set_status("Game over. Full board revealed.")
         self.statusBar().showMessage("Game over.")
+        if ended_by != "disconnect":
+            self.panel.set_rematch_visible(True)
+            self.panel.append_log(
+                "Click Rematch to play again with the same opponent.", "ok"
+            )
+
+    @Slot()
+    def _on_rematch(self) -> None:
+        self.client.send_rematch(True)
+        self.panel.set_rematch_visible(True, enabled=False)
+        self.panel.set_status("Rematch requested. Waiting for opponent...")
+        self.panel.append_log("Rematch requested.", "ok")
+
+    @Slot()
+    def _on_rematch_declined(self) -> None:
+        self.panel.set_rematch_visible(False)
+        self.panel.append_log("Opponent declined the rematch.", "error")
+        self.panel.set_status("No rematch. Close the window to exit.")
 
     @Slot(str)
     def _on_error(self, message: str) -> None:

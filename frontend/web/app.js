@@ -22,6 +22,13 @@ let myName = "";
 let turnTimer = null;
 let turnDeadlineTs = null;
 let gameHasEnded = false;
+let lastOwnMove = null;
+let lastTickSecond = null;
+let audioCtx = null;
+let showNumbers = false;
+let myMoveNumbers = [];      // [[r, c, n], ...] from server during play
+let fullMoveHistory = [];    // [[color_name, r, c], ...] from game_end
+let lastRenderArgs = null;   // [stones, revealAll] for re-render on toggle
 
 // Screens
 const lobbyScreen = document.getElementById("lobby");
@@ -52,8 +59,49 @@ const messageEl = document.getElementById("message");
 const passBtn = document.getElementById("pass-btn");
 const resignBtn = document.getElementById("resign-btn");
 const backToLobbyBtn = document.getElementById("back-to-lobby-btn");
+const rematchBtn = document.getElementById("rematch-btn");
+const showNumbersBtn = document.getElementById("show-numbers-btn");
 const timerEl = document.getElementById("timer");
 const timerValueEl = document.getElementById("timer-value");
+
+// --- Audio cues --------------------------------------------------------
+// Browsers block AudioContext creation until a user gesture. We create it
+// lazily on the first lobby click; subsequent sounds go through playTone().
+
+function ensureAudio() {
+  if (audioCtx !== null) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) audioCtx = new Ctx();
+  } catch (_) {
+    audioCtx = null;
+  }
+}
+
+function playTone(freq, durationMs, type = "sine", gain = 0.15) {
+  if (!audioCtx) return;
+  if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+  const now = audioCtx.currentTime;
+  const osc = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, now);
+  g.gain.setValueAtTime(0, now);
+  g.gain.linearRampToValueAtTime(gain, now + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, now + durationMs / 1000);
+  osc.connect(g).connect(audioCtx.destination);
+  osc.start(now);
+  osc.stop(now + durationMs / 1000 + 0.02);
+}
+
+function playTurnChime() {
+  playTone(880, 100);
+  setTimeout(() => playTone(1320, 120), 90);
+}
+
+function playUrgentTick() {
+  playTone(660, 60, "square", 0.1);
+}
 
 function show(screen) {
   lobbyScreen.classList.toggle("hidden", screen !== "lobby");
@@ -139,6 +187,7 @@ function setHitsLive(live) {
 }
 
 function renderStones(stones, revealAll) {
+  lastRenderArgs = [stones, revealAll];
   const layer = document.getElementById("stones-layer");
   if (!layer) return;
   layer.innerHTML = "";
@@ -154,6 +203,65 @@ function renderStones(stones, revealAll) {
       }));
     }
   }
+  renderLastMoveMarker();
+  if (showNumbers) renderMoveNumberOverlay(stones, revealAll);
+}
+
+function renderMoveNumberOverlay(stones, revealAll) {
+  const layer = document.getElementById("stones-layer");
+  if (!layer) return;
+  // Build (r,c) -> [ordinal, expected_stone_color] from server data.
+  // Latest entry per position wins (for capture-and-replay shapes).
+  const numByPos = new Map();
+  if (revealAll && fullMoveHistory.length > 0) {
+    fullMoveHistory.forEach(([colorName, r, c], i) => {
+      const expected = colorName === "BLACK" ? BLACK : WHITE;
+      numByPos.set(`${r},${c}`, [i + 1, expected]);
+    });
+  } else {
+    const expected = myColor;
+    myMoveNumbers.forEach(([r, c, n]) => {
+      numByPos.set(`${r},${c}`, [n, expected]);
+    });
+  }
+  for (let r = 0; r < BOARD_SIZE; r++) {
+    for (let c = 0; c < BOARD_SIZE; c++) {
+      const v = stones[r * BOARD_SIZE + c];
+      if (v === EMPTY) continue;
+      const entry = numByPos.get(`${r},${c}`);
+      if (!entry) continue;
+      const [n, expected] = entry;
+      // Skip stale numbers (the move at that point belonged to a stone
+      // that was later captured and overwritten by the other color).
+      if (v !== expected) continue;
+      const [cx, cy] = intersectionXY(r, c);
+      const t = svgEl("text", {
+        x: cx, y: cy + 1,
+        "text-anchor": "middle",
+        class: "stone-num " + (v === BLACK ? "on-black" : "on-white"),
+      });
+      t.textContent = String(n);
+      layer.appendChild(t);
+    }
+  }
+}
+
+showNumbersBtn.addEventListener("click", () => {
+  showNumbers = !showNumbers;
+  showNumbersBtn.textContent = showNumbers ? "Hide #" : "Show #";
+  if (lastRenderArgs) renderStones(...lastRenderArgs);
+});
+
+function renderLastMoveMarker() {
+  const layer = document.getElementById("stones-layer");
+  if (!layer || lastOwnMove === null || myColor === null) return;
+  const [r, c] = lastOwnMove;
+  const [cx, cy] = intersectionXY(r, c);
+  const onBlack = myColor === BLACK;
+  layer.appendChild(svgEl("circle", {
+    cx, cy, r: CELL / 6,
+    class: "last-move-marker " + (onBlack ? "on-black" : "on-white"),
+  }));
 }
 
 function placeStoneLocal(r, c, color) {
@@ -164,6 +272,8 @@ function placeStoneLocal(r, c, color) {
     cx, cy, r: CELL / 2 - 5,
     class: "stone " + (color === BLACK ? "black" : "white"),
   }));
+  lastOwnMove = [r, c];
+  renderLastMoveMarker();
 }
 
 function onIntersectionClick(r, c) {
@@ -213,6 +323,10 @@ function renderTimer() {
   const remaining = Math.max(0, Math.ceil((turnDeadlineTs - Date.now()) / 1000));
   timerValueEl.textContent = remaining;
   timerEl.classList.toggle("urgent", remaining <= 5);
+  if (remaining > 0 && remaining <= 5 && remaining !== lastTickSecond) {
+    lastTickSecond = remaining;
+    playUrgentTick();
+  }
   if (remaining <= 0) {
     clearInterval(turnTimer);
     turnTimer = null;
@@ -225,12 +339,16 @@ function stopTurnTimer() {
     turnTimer = null;
   }
   turnDeadlineTs = null;
+  lastTickSecond = null;
   timerEl.classList.add("hidden");
   timerEl.classList.remove("urgent");
 }
 
 function resetToLobby() {
   if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify({ type: "rematch", agree: false }));
+    } catch (_) { /* ignore */ }
     ws.close();
   }
   ws = null;
@@ -238,8 +356,11 @@ function resetToLobby() {
   myTurn = false;
   pendingPlay = null;
   gameHasEnded = false;
+  lastOwnMove = null;
+  myMoveNumbers = [];
+  fullMoveHistory = [];
   stopTurnTimer();
-  backToLobbyBtn.classList.add("hidden");
+  hideEndGameButtons();
   setTurnControls(false);
   setMessage("", null);
   showLobbyError("");
@@ -251,7 +372,26 @@ function resetToLobby() {
   show("lobby");
 }
 
+function hideEndGameButtons() {
+  backToLobbyBtn.classList.add("hidden");
+  rematchBtn.classList.add("hidden");
+  rematchBtn.disabled = false;
+}
+
+function showEndGameButtons() {
+  backToLobbyBtn.classList.remove("hidden");
+  rematchBtn.classList.remove("hidden");
+  rematchBtn.disabled = false;
+}
+
 backToLobbyBtn.addEventListener("click", resetToLobby);
+
+rematchBtn.addEventListener("click", () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "rematch", agree: true }));
+  rematchBtn.disabled = true;
+  setMessage("Rematch requested. Waiting for opponent...", "ok");
+});
 
 // --- Lobby ---
 
@@ -285,6 +425,7 @@ function openSocket() {
 }
 
 randomBtn.addEventListener("click", () => {
+  ensureAudio();
   myName = getName();
   showLobbyError("");
   ws = openSocket();
@@ -298,6 +439,7 @@ randomBtn.addEventListener("click", () => {
 });
 
 createBtn.addEventListener("click", () => {
+  ensureAudio();
   myName = getName();
   showLobbyError("");
   ws = openSocket();
@@ -311,6 +453,7 @@ createBtn.addEventListener("click", () => {
 });
 
 joinBtn.addEventListener("click", () => {
+  ensureAudio();
   const code = (joinCodeInput.value || "").trim().toUpperCase();
   if (code.length < 4) {
     showLobbyError("Room code must be 4 characters.");
@@ -363,15 +506,27 @@ function handleMessage(msg) {
       opponentLabel.textContent = msg.opponent
         ? `vs. ${msg.opponent}`
         : "vs. opponent";
+      // Reset per-game state — second welcome = rematch starting.
+      gameHasEnded = false;
+      pendingPlay = null;
+      lastOwnMove = null;
+      myMoveNumbers = [];
+      fullMoveHistory = [];
+      hideEndGameButtons();
+      stopTurnTimer();
       setMessage("", null);
+      infoEl.innerHTML = "";
       show("game");
       initBoard();
       break;
 
     case "your_turn": {
       const v = msg.view;
+      lastOwnMove = v.last_own_move || null;
+      myMoveNumbers = v.own_move_numbers || [];
       renderStones(v.your_stones, false);
       setTurnControls(true);
+      playTurnChime();
       infoEl.innerHTML = `
         Attempts this turn: <strong>${v.attempts_remaining}</strong><br>
         You have captured: <strong>${v.total_captured_by_me}</strong><br>
@@ -437,6 +592,7 @@ function handleMessage(msg) {
 
     case "game_end": {
       gameHasEnded = true;
+      fullMoveHistory = msg.move_history || [];
       renderStones(msg.full_board, true);
       setTurnControls(false);
       stopTurnTimer();
@@ -449,11 +605,22 @@ function handleMessage(msg) {
         WHITE score: ${msg.white_score}<br>
         ${result}
       `;
-      setMessage("Full board revealed.", "ok");
+      setMessage("Full board revealed. Rematch for another game?", "ok");
       statusEl.textContent = "Game over.";
-      backToLobbyBtn.classList.remove("hidden");
+      if (msg.ended_by === "disconnect") {
+        // Opponent gone — no rematch possible.
+        backToLobbyBtn.classList.remove("hidden");
+      } else {
+        showEndGameButtons();
+      }
       break;
     }
+
+    case "rematch_declined":
+      setMessage("Opponent declined the rematch.", "error");
+      rematchBtn.classList.add("hidden");
+      backToLobbyBtn.classList.remove("hidden");
+      break;
 
     case "error":
       setMessage(`Server error: ${msg.message}`, "error");

@@ -89,6 +89,21 @@ async def run_client(host: str, port: int) -> int:
 
             if t == "game_end":
                 _print_game_end(msg)
+                if msg.get("ended_by") == "disconnect":
+                    return 0
+                try:
+                    ans = await ainput("  Rematch? [y/n]: ")
+                except EOFError:
+                    ans = "n"
+                agree = ans.strip().lower().startswith("y")
+                await write_frame(writer, {"type": "rematch", "agree": agree})
+                if not agree:
+                    return 0
+                print("  Waiting for opponent's answer...")
+                continue
+
+            if t == "rematch_declined":
+                print("  Opponent declined the rematch.")
                 return 0
 
             if t == "error":
