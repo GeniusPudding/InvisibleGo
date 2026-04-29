@@ -12,15 +12,31 @@ from __future__ import annotations
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Awaitable, Callable
 
-from core.board import Color
+from core.board import BOARD_SIZE, Color, Point
 from core.game import GameState, MoveOutcome
 from core.scoring import area_score
 from protocol.messages import view_to_dict
 
 DEFAULT_TURN_TIMEOUT_SECONDS = 20.0
 DEFAULT_REMATCH_DECISION_SECONDS = 30.0
+
+# Returns the set of points to remove as dead, or None if the resolver
+# aborted via disconnect (in which case the resolver itself is expected
+# to have already broadcast game_end). Receives the GameSession so it
+# can inspect the board, talk to either Connection, or look up names.
+# The default implementation is interactive (BLACK proposes, WHITE
+# approves); future implementations may plug in automatic life/death
+# detection (Benson's algorithm, neural-net inference, etc).
+DeadStoneResolver = Callable[["GameSession"], Awaitable["set[Point] | None"]]
+
+
+async def no_dead_stones(_session: "GameSession") -> set[Point]:
+    """Resolver that always returns an empty set — used by tests and
+    by transports that don't (yet) implement a marking UI. Production
+    transports get the interactive default."""
+    return set()
 
 
 class Connection(ABC):
@@ -40,6 +56,7 @@ class GameSession:
         black_name: str = "",
         white_name: str = "",
         turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
+        dead_stone_resolver: DeadStoneResolver | None = None,
     ) -> None:
         self.conns: dict[Color, Connection] = {Color.BLACK: black, Color.WHITE: white}
         self.names: dict[Color, str] = {
@@ -48,9 +65,14 @@ class GameSession:
         }
         self.game = GameState()
         self.turn_timeout_seconds = turn_timeout_seconds
+        # If None, the built-in interactive marker/approver flow runs.
+        self.dead_stone_resolver = dead_stone_resolver
         # Set by _broadcast_game_end so callers (e.g. run_match_series) can
         # tell whether a rematch is even possible.
         self.ended_by: str | None = None
+        # Populated by the dead-stone marking phase, exposed in game_end
+        # so clients can render the removed groups distinctly.
+        self.removed_dead: set[Point] = set()
 
     async def run(self) -> None:
         """Drive the game to completion. Sends welcome messages first."""
@@ -85,6 +107,20 @@ class GameSession:
             if not cont:
                 return
 
+        # Loop only exits naturally on two consecutive passes — resign
+        # and disconnect already returned early after broadcasting. Now
+        # negotiate dead stones before we score.
+        if self.dead_stone_resolver is None:
+            dead = await self._interactive_dead_resolver()
+        else:
+            dead = await self.dead_stone_resolver(self)
+        if dead is None:
+            # Resolver broadcast game_end itself (disconnect during
+            # marking). Nothing more for us to do.
+            return
+        if dead:
+            self.removed_dead = set(dead)
+            self.game.board = self.game.board.with_stones_removed(self.removed_dead)
         await self._broadcast_game_end(ended_by="pass", resigner=None)
 
     async def _handle_turn(self, current: Color, conn: Connection) -> bool:
@@ -147,6 +183,90 @@ class GameSession:
 
             return True
 
+    async def _interactive_dead_resolver(self) -> set[Point] | None:
+        """Default marking flow: BLACK proposes which groups are dead;
+        WHITE approves or rejects. On reject, BLACK marks again. Roles
+        are stable for now — future iterations could swap on reject or
+        accept consensus from either side.
+
+        Returns the set of dead points to remove, or None if either side
+        disconnected (game_end already broadcast as 'disconnect').
+        """
+        marker_color = Color.BLACK
+        approver_color = Color.WHITE
+        marker = self.conns[marker_color]
+        approver = self.conns[approver_color]
+        revealed_board = list(self.game.board.stones)
+
+        await marker.send(
+            {
+                "type": "dead_marking_started",
+                "your_role": "marker",
+                "full_board": revealed_board,
+            }
+        )
+        await approver.send(
+            {
+                "type": "dead_marking_started",
+                "your_role": "approver",
+                "full_board": revealed_board,
+            }
+        )
+
+        while True:
+            msg = await marker.recv()
+            if msg is None:
+                await self._broadcast_game_end(
+                    ended_by="disconnect", resigner=marker_color
+                )
+                return None
+            if msg.get("type") == "mark_dead":
+                proposal = self._sanitize_dead_points(msg.get("points") or [])
+            else:
+                # Defensive — anything other than mark_dead is treated
+                # as an empty proposal so the approver can still react.
+                proposal = []
+            await approver.send(
+                {"type": "dead_marking_proposal", "points": proposal}
+            )
+
+            decision = await approver.recv()
+            if decision is None:
+                await self._broadcast_game_end(
+                    ended_by="disconnect", resigner=approver_color
+                )
+                return None
+            if (
+                decision.get("type") == "mark_decision"
+                and decision.get("approve") is True
+            ):
+                return {(int(r), int(c)) for r, c in proposal}
+            # Reject (any other shape is treated as a reject too).
+            await marker.send({"type": "dead_marking_rejected"})
+
+    def _sanitize_dead_points(self, raw: Any) -> list[list[int]]:
+        """Filter incoming dead-stone proposal: only on-board points
+        currently occupied by a stone, deduplicated, in stable order."""
+        result: list[list[int]] = []
+        seen: set[tuple[int, int]] = set()
+        if not isinstance(raw, list):
+            return result
+        for entry in raw:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            r, c = entry
+            if not (isinstance(r, int) and isinstance(c, int)):
+                continue
+            if not (0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE):
+                continue
+            if self.game.board.at((r, c)) is Color.EMPTY:
+                continue
+            if (r, c) in seen:
+                continue
+            seen.add((r, c))
+            result.append([r, c])
+        return result
+
     async def _broadcast_game_end(self, ended_by: str, resigner: Color | None) -> None:
         score = area_score(self.game.board)
         if ended_by in ("resign", "disconnect") and resigner is not None:
@@ -168,6 +288,10 @@ class GameSession:
             "move_history": [
                 [c.name, r, col] for (c, (r, col)) in self.game.move_history
             ],
+            # Stones agreed-dead during the marking phase (already removed
+            # from full_board for scoring). Empty when no stones were
+            # marked or when game ended via resign/disconnect.
+            "dead_stones": [list(p) for p in sorted(self.removed_dead)],
         }
         self.ended_by = ended_by
         for conn in self.conns.values():
@@ -198,6 +322,7 @@ async def run_match_series(
     white_name: str = "",
     turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
     rematch_timeout_seconds: float = DEFAULT_REMATCH_DECISION_SECONDS,
+    dead_stone_resolver: DeadStoneResolver | None = None,
 ) -> None:
     """Play a series of games; after each, offer both sides a rematch.
 
@@ -212,6 +337,7 @@ async def run_match_series(
             black_name=black_name,
             white_name=white_name,
             turn_timeout_seconds=turn_timeout_seconds,
+            dead_stone_resolver=dead_stone_resolver,
         )
         await session.run()
         if session.ended_by == "disconnect":

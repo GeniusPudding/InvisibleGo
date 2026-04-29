@@ -85,6 +85,10 @@ class MainWindow(QMainWindow):
         self.panel.resign_clicked.connect(self._on_resign)
         self.panel.rematch_clicked.connect(self._on_rematch)
         self.panel.show_numbers_toggled.connect(self.board.set_show_numbers)
+        self.panel.submit_dead_clicked.connect(self._on_submit_dead)
+        self.panel.clear_dead_clicked.connect(self.board.clear_proposed_dead)
+        self.panel.approve_dead_clicked.connect(self._on_approve_dead)
+        self.panel.reject_dead_clicked.connect(self._on_reject_dead)
 
         self.client.connected.connect(self._on_connected)
         self.client.welcome.connect(self._on_welcome)
@@ -95,6 +99,9 @@ class MainWindow(QMainWindow):
         self.client.turn_timeout.connect(self._on_turn_timeout)
         self.client.game_end.connect(self._on_game_end)
         self.client.rematch_declined.connect(self._on_rematch_declined)
+        self.client.dead_marking_started.connect(self._on_dead_marking_started)
+        self.client.dead_marking_proposal.connect(self._on_dead_marking_proposal)
+        self.client.dead_marking_rejected.connect(self._on_dead_marking_rejected)
         self.client.error.connect(self._on_error)
         self.client.disconnected.connect(self._on_disconnected)
 
@@ -214,6 +221,11 @@ class MainWindow(QMainWindow):
 
     @Slot(dict)
     def _on_game_end(self, msg: dict) -> None:
+        # Exit any open marking phase before showing the scored board.
+        self.board.exit_marking_mode()
+        self.panel.set_marker_controls_visible(False)
+        self.panel.set_approver_controls_visible(False)
+        self.panel.set_play_controls_visible(True)
         self.board.set_stones(msg.get("full_board", []))
         self.board.set_full_move_history(msg.get("move_history", []))
         self.board.set_my_turn(False)
@@ -253,6 +265,65 @@ class MainWindow(QMainWindow):
         self.panel.set_rematch_visible(False)
         self.panel.append_log("Opponent declined the rematch.", "error")
         self.panel.set_status("No rematch. Close the window to exit.")
+
+    # --- Dead-stone marking phase ----------------------------------------
+
+    @Slot(str, list)
+    def _on_dead_marking_started(self, role: str, full_board: list) -> None:
+        self.board.set_stones(full_board)
+        self.board.enter_marking_mode(role)
+        self.panel.set_play_controls_visible(False)
+        if role == "marker":
+            self.panel.set_marker_controls_visible(True, submit_enabled=True)
+            self.panel.set_approver_controls_visible(False)
+            self.panel.set_status(
+                "Mark dead groups: click any stone in a group to toggle it. Submit when ready."
+            )
+            self.panel.append_log(
+                "You're the marker. Click groups you think are dead, then Submit.", "ok"
+            )
+        else:
+            self.panel.set_marker_controls_visible(False)
+            self.panel.set_approver_controls_visible(False)  # shown when proposal arrives
+            self.panel.set_status("Waiting for opponent to mark dead stones...")
+            self.panel.append_log("Opponent is marking dead stones.", "ok")
+
+    @Slot(list)
+    def _on_dead_marking_proposal(self, points: list) -> None:
+        self.board.set_proposed_dead(points)
+        self.panel.set_approver_controls_visible(True)
+        if points:
+            self.panel.set_status(
+                f"Opponent proposed {len(points)} dead stone(s). Approve or Reject."
+            )
+        else:
+            self.panel.set_status("Opponent proposed no dead stones. Approve or Reject.")
+
+    @Slot()
+    def _on_dead_marking_rejected(self) -> None:
+        self.panel.set_marker_controls_visible(True, submit_enabled=True)
+        self.panel.append_log("Opponent rejected. Adjust and submit again.", "warn")
+        self.panel.set_status("Adjust dead-stone selection and re-submit.")
+
+    @Slot()
+    def _on_submit_dead(self) -> None:
+        points = sorted(self.board.proposed_dead())
+        self.client.send_mark_dead(list(points))
+        self.panel.set_marker_controls_visible(True, submit_enabled=False)
+        self.panel.set_status("Submitted. Waiting for opponent...")
+
+    @Slot()
+    def _on_approve_dead(self) -> None:
+        self.client.send_mark_decision(True)
+        self.panel.set_approver_controls_visible(False)
+        self.panel.set_status("Approved. Computing final score...")
+
+    @Slot()
+    def _on_reject_dead(self) -> None:
+        self.client.send_mark_decision(False)
+        self.panel.set_approver_controls_visible(False)
+        self.board.clear_proposed_dead()
+        self.panel.set_status("Rejected. Opponent will mark again.")
 
     @Slot(str)
     def _on_error(self, message: str) -> None:

@@ -31,6 +31,9 @@ class NetworkClient(QObject):
     turn_timeout = Signal()
     game_end = Signal(dict)
     rematch_declined = Signal()
+    dead_marking_started = Signal(str, list)
+    dead_marking_proposal = Signal(list)
+    dead_marking_rejected = Signal()
     error = Signal(str)
     disconnected = Signal()
     connected = Signal()
@@ -139,6 +142,15 @@ class NetworkClient(QObject):
             self.game_end.emit(msg)
         elif t == "rematch_declined":
             self.rematch_declined.emit()
+        elif t == "dead_marking_started":
+            self.dead_marking_started.emit(
+                str(msg.get("your_role", "")),
+                list(msg.get("full_board", [])),
+            )
+        elif t == "dead_marking_proposal":
+            self.dead_marking_proposal.emit(list(msg.get("points", [])))
+        elif t == "dead_marking_rejected":
+            self.dead_marking_rejected.emit()
         elif t == "error":
             self.error.emit(str(msg.get("message", "")))
 
@@ -165,3 +177,9 @@ class NetworkClient(QObject):
 
     def send_rematch(self, agree: bool) -> None:
         self._send({"type": "rematch", "agree": agree})
+
+    def send_mark_dead(self, points: list[tuple[int, int]]) -> None:
+        self._send({"type": "mark_dead", "points": [[r, c] for (r, c) in points]})
+
+    def send_mark_decision(self, approve: bool) -> None:
+        self._send({"type": "mark_decision", "approve": approve})

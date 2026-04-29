@@ -169,6 +169,11 @@ button:not(:disabled):hover { background: var(--accent); color: white; }
 }
 .stone-num.on-black { fill: #fff; }
 .stone-num.on-white { fill: #000; }
+
+/* Dead-stone marker (red X drawn on top of a stone during the
+   marking phase). Pointer-events disabled so the stone underneath
+   keeps catching clicks for group toggling. */
+.dead-x { stroke: #ff2020; stroke-width: 3; pointer-events: none; }
 .coord {
   fill: var(--board-line);
   font: 12px system-ui, sans-serif;

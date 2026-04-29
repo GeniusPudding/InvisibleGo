@@ -48,6 +48,7 @@ STAR_POINTS = [(2, 2), (2, 6), (4, 4), (6, 2), (6, 6)]
 
 class BoardWidget(QWidget):
     intersection_clicked = Signal(int, int)
+    dead_group_toggled = Signal(int, int)  # marker mode click
 
     CELL = 60
     PAD = 36
@@ -69,6 +70,9 @@ class BoardWidget(QWidget):
         self._show_numbers: bool = False
         self._own_numbers: dict[tuple[int, int], int] = {}
         self._full_history: list[tuple[str, int, int]] = []
+        # Dead-marking phase state. _marking_mode = "marker" | "approver" | "".
+        self._marking_mode: str = ""
+        self._proposed_dead: set[tuple[int, int]] = set()
 
     def set_stones(self, stones) -> None:
         self._stones = list(stones)
@@ -102,6 +106,29 @@ class BoardWidget(QWidget):
         self._own_numbers = {}
         self._full_history = []
         self._last_own_move = None
+        self._marking_mode = ""
+        self._proposed_dead = set()
+        self.update()
+
+    def enter_marking_mode(self, role: str) -> None:
+        self._marking_mode = role
+        self._proposed_dead = set()
+        self.update()
+
+    def exit_marking_mode(self) -> None:
+        self._marking_mode = ""
+        self._proposed_dead = set()
+        self.update()
+
+    def set_proposed_dead(self, points) -> None:
+        self._proposed_dead = {(int(r), int(c)) for r, c in (points or [])}
+        self.update()
+
+    def proposed_dead(self) -> set[tuple[int, int]]:
+        return set(self._proposed_dead)
+
+    def clear_proposed_dead(self) -> None:
+        self._proposed_dead = set()
         self.update()
 
     def place_stone(self, r: int, c: int, color: int) -> None:
@@ -214,6 +241,10 @@ class BoardWidget(QWidget):
         if self._show_numbers:
             self._draw_move_numbers(p)
 
+        # Dead-marking overlay: red X on every proposed dead stone.
+        if self._marking_mode and self._proposed_dead:
+            self._draw_dead_markers(p)
+
         # Hover indicator on empty intersections during your turn
         if self._hover is not None and self._my_turn:
             r, c = self._hover
@@ -226,6 +257,50 @@ class BoardWidget(QWidget):
                     self.CELL * 0.42,
                     self.CELL * 0.42,
                 )
+
+    def _draw_dead_markers(self, p: QPainter) -> None:
+        size = self.CELL * 0.22
+        pen = QPen(QColor("#ff2020"))
+        pen.setWidth(3)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        for r, c in self._proposed_dead:
+            cx, cy = self._intersection_xy(r, c)
+            p.drawLine(int(cx - size), int(cy - size), int(cx + size), int(cy + size))
+            p.drawLine(int(cx + size), int(cy - size), int(cx - size), int(cy + size))
+
+    def _bfs_group(self, r0: int, c0: int) -> list[tuple[int, int]]:
+        """Connected same-color group containing (r0, c0). Empty if start is empty."""
+        v0 = self._stones[r0 * BOARD_SIZE + c0]
+        if v0 == EMPTY:
+            return []
+        seen: set[tuple[int, int]] = set()
+        out: list[tuple[int, int]] = []
+        stack = [(r0, c0)]
+        while stack:
+            r, c = stack.pop()
+            if (r, c) in seen:
+                continue
+            seen.add((r, c))
+            if self._stones[r * BOARD_SIZE + c] != v0:
+                continue
+            out.append((r, c))
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE:
+                    stack.append((nr, nc))
+        return out
+
+    def _toggle_dead_group_at(self, r: int, c: int) -> None:
+        group = self._bfs_group(r, c)
+        if not group:
+            return
+        any_marked = any(point in self._proposed_dead for point in group)
+        if any_marked:
+            self._proposed_dead -= set(group)
+        else:
+            self._proposed_dead |= set(group)
+        self.update()
 
     def _draw_move_numbers(self, p: QPainter) -> None:
         # Build (r, c) -> (ordinal, expected_color_int).
@@ -305,10 +380,16 @@ class BoardWidget(QWidget):
             self.update()
 
     def mousePressEvent(self, ev: QMouseEvent) -> None:  # noqa: N802
-        if not self._my_turn or ev.button() != Qt.LeftButton:
+        if ev.button() != Qt.LeftButton:
             return
         pos = self._pixel_to_intersection(ev.position())
-        if pos is not None:
+        if pos is None:
+            return
+        if self._marking_mode == "marker":
+            self._toggle_dead_group_at(*pos)
+            self.dead_group_toggled.emit(*pos)
+            return
+        if self._my_turn:
             self.intersection_clicked.emit(*pos)
 
 
@@ -317,6 +398,10 @@ class SidePanel(QWidget):
     resign_clicked = Signal()
     rematch_clicked = Signal()
     show_numbers_toggled = Signal(bool)
+    submit_dead_clicked = Signal()
+    clear_dead_clicked = Signal()
+    approve_dead_clicked = Signal()
+    reject_dead_clicked = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -362,9 +447,25 @@ class SidePanel(QWidget):
         self.show_numbers_btn = QPushButton("Show #")
         self.show_numbers_btn.setCheckable(True)
         self.show_numbers_btn.toggled.connect(self._on_numbers_toggled)
+        self.submit_dead_btn = QPushButton("Submit dead")
+        self.submit_dead_btn.setVisible(False)
+        self.submit_dead_btn.clicked.connect(self.submit_dead_clicked.emit)
+        self.clear_dead_btn = QPushButton("Clear")
+        self.clear_dead_btn.setVisible(False)
+        self.clear_dead_btn.clicked.connect(self.clear_dead_clicked.emit)
+        self.approve_dead_btn = QPushButton("Approve")
+        self.approve_dead_btn.setVisible(False)
+        self.approve_dead_btn.clicked.connect(self.approve_dead_clicked.emit)
+        self.reject_dead_btn = QPushButton("Reject")
+        self.reject_dead_btn.setVisible(False)
+        self.reject_dead_btn.clicked.connect(self.reject_dead_clicked.emit)
         button_row.addWidget(self.pass_btn)
         button_row.addWidget(self.resign_btn)
         button_row.addWidget(self.show_numbers_btn)
+        button_row.addWidget(self.submit_dead_btn)
+        button_row.addWidget(self.clear_dead_btn)
+        button_row.addWidget(self.approve_dead_btn)
+        button_row.addWidget(self.reject_dead_btn)
         button_row.addWidget(self.rematch_btn)
         button_row.addStretch()
         layout.addLayout(button_row)
@@ -410,6 +511,20 @@ class SidePanel(QWidget):
     def set_rematch_visible(self, visible: bool, enabled: bool = True) -> None:
         self.rematch_btn.setVisible(visible)
         self.rematch_btn.setEnabled(enabled)
+
+    def set_marker_controls_visible(self, visible: bool, submit_enabled: bool = True) -> None:
+        self.submit_dead_btn.setVisible(visible)
+        self.submit_dead_btn.setEnabled(submit_enabled)
+        self.clear_dead_btn.setVisible(visible)
+
+    def set_approver_controls_visible(self, visible: bool) -> None:
+        self.approve_dead_btn.setVisible(visible)
+        self.reject_dead_btn.setVisible(visible)
+
+    def set_play_controls_visible(self, visible: bool) -> None:
+        # During the marking phase the normal play buttons are hidden.
+        self.pass_btn.setVisible(visible)
+        self.resign_btn.setVisible(visible)
 
     def set_state(self, attempts: int, captured: int, lost: int) -> None:
         self.attempts_label.setText(str(attempts))

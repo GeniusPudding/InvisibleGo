@@ -14,7 +14,7 @@ import asyncio
 from core.board import BOARD_SIZE
 from protocol.messages import read_frame, write_frame
 from transport.lan.server import TcpConnection
-from transport.session import run_match_series
+from transport.session import no_dead_stones, run_match_series
 
 
 async def _spin_up_server():
@@ -69,7 +69,7 @@ async def test_tcp_loopback_full_game_reaches_scored_game_end():
     r1, w1 = await asyncio.open_connection("127.0.0.1", port)
     r2, w2 = await asyncio.open_connection("127.0.0.1", port)
     await asyncio.wait_for(ready.wait(), timeout=2.0)
-    task = asyncio.create_task(run_match_series(black=pending[0], white=pending[1]))
+    task = asyncio.create_task(run_match_series(black=pending[0], white=pending[1], dead_stone_resolver=no_dead_stones))
 
     await _read_until(r1, "welcome")
     await _read_until(r2, "welcome")
@@ -104,7 +104,7 @@ async def test_tcp_loopback_rematch_accept_starts_second_game():
     r1, w1 = await asyncio.open_connection("127.0.0.1", port)
     r2, w2 = await asyncio.open_connection("127.0.0.1", port)
     await asyncio.wait_for(ready.wait(), timeout=2.0)
-    task = asyncio.create_task(run_match_series(black=pending[0], white=pending[1]))
+    task = asyncio.create_task(run_match_series(black=pending[0], white=pending[1], dead_stone_resolver=no_dead_stones))
 
     # Game 1: pass-pass.
     await _read_until(r1, "welcome")
@@ -145,7 +145,7 @@ async def test_tcp_illegal_move_response_has_no_reason_field():
     r1, w1 = await asyncio.open_connection("127.0.0.1", port)
     r2, w2 = await asyncio.open_connection("127.0.0.1", port)
     await asyncio.wait_for(ready.wait(), timeout=2.0)
-    task = asyncio.create_task(run_match_series(black=pending[0], white=pending[1]))
+    task = asyncio.create_task(run_match_series(black=pending[0], white=pending[1], dead_stone_resolver=no_dead_stones))
 
     await _read_until(r1, "welcome")
     await _read_until(r2, "welcome")
@@ -169,6 +169,56 @@ async def test_tcp_illegal_move_response_has_no_reason_field():
     await _shutdown(server, [w1, w2], task)
 
 
+async def test_tcp_dead_marking_round_trip():
+    """Run the full pass-pass → marking → approve → score flow over a
+    real TCP connection so any frame-level regressions surface."""
+    server, port, pending, ready = await _spin_up_server()
+    r1, w1 = await asyncio.open_connection("127.0.0.1", port)
+    r2, w2 = await asyncio.open_connection("127.0.0.1", port)
+    await asyncio.wait_for(ready.wait(), timeout=2.0)
+    # No resolver override — exercise the interactive default.
+    task = asyncio.create_task(run_match_series(black=pending[0], white=pending[1]))
+
+    await _read_until(r1, "welcome")
+    await _read_until(r2, "welcome")
+    # BLACK plays (0,0), WHITE plays (8,8), both pass.
+    await _read_until(r1, "your_turn")
+    await write_frame(w1, {"type": "play", "row": 0, "col": 0})
+    await _read_until(r1, "played")
+    await _read_until(r2, "your_turn")
+    await write_frame(w2, {"type": "play", "row": 8, "col": 8})
+    await _read_until(r2, "played")
+    await _read_until(r1, "your_turn")
+    await write_frame(w1, {"type": "pass"})
+    await _read_until(r1, "passed")
+    await _read_until(r2, "your_turn")
+    await write_frame(w2, {"type": "pass"})
+
+    # Both should now see dead_marking_started.
+    m1 = await _read_until(r1, "dead_marking_started")
+    m2 = await _read_until(r2, "dead_marking_started")
+    assert m1["your_role"] == "marker"
+    assert m2["your_role"] == "approver"
+
+    # BLACK proposes WHITE's stone is dead, WHITE approves.
+    await write_frame(w1, {"type": "mark_dead", "points": [[8, 8]]})
+    proposal = await _read_until(r2, "dead_marking_proposal")
+    assert proposal["points"] == [[8, 8]]
+    await write_frame(w2, {"type": "mark_decision", "approve": True})
+
+    # Both see game_end with WHITE's stone removed.
+    g1 = await _read_until(r1, "game_end")
+    g2 = await _read_until(r2, "game_end")
+    assert g1 == g2
+    assert g1["dead_stones"] == [[8, 8]]
+    assert g1["full_board"][8 * BOARD_SIZE + 8] == 0
+    assert g1["winner"] == "BLACK"
+
+    await write_frame(w1, {"type": "rematch", "agree": False})
+    await write_frame(w2, {"type": "rematch", "agree": False})
+    await _shutdown(server, [w1, w2], task)
+
+
 async def test_tcp_client_disconnect_mid_game_ends_series():
     """If a client drops mid-turn, the survivor receives a disconnect
     game_end and the match series terminates without offering a
@@ -177,7 +227,7 @@ async def test_tcp_client_disconnect_mid_game_ends_series():
     r1, w1 = await asyncio.open_connection("127.0.0.1", port)
     r2, w2 = await asyncio.open_connection("127.0.0.1", port)
     await asyncio.wait_for(ready.wait(), timeout=2.0)
-    task = asyncio.create_task(run_match_series(black=pending[0], white=pending[1]))
+    task = asyncio.create_task(run_match_series(black=pending[0], white=pending[1], dead_stone_resolver=no_dead_stones))
 
     await _read_until(r1, "welcome")
     await _read_until(r2, "welcome")

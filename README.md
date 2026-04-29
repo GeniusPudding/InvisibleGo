@@ -70,6 +70,7 @@ that can open a WebSocket) is zero server-side work.
 - [x] Last-move marker, turn-change & countdown sound cues
 - [x] Rematch with same opponent (colors swap automatically)
 - [x] Move-number toggle (Show #) on web + desktop; SVG endgame snapshots in tests
+- [x] Dead-stone marking phase: marker proposes, approver approves/rejects (pluggable resolver for future auto life/death detection)
 - [x] Public deployment (AWS EC2 + Docker + Caddy + Let's Encrypt TLS)
 - [ ] Online lobby — player list, direct challenges, ratings (OGS-style)
 - [ ] Mobile client (iOS / Android)

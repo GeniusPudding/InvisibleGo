@@ -19,11 +19,16 @@ import copy
 import random
 from typing import Any, Iterable
 
-from core.board import BOARD_SIZE, Board, Color
+from core.board import BOARD_SIZE, Board, Color, neighbors
 from core.game import GameState, MoveOutcome
 from core.scoring import area_score
 from tests.snapshot import write_snapshot
-from transport.session import Connection, GameSession, run_match_series
+from transport.session import (
+    Connection,
+    GameSession,
+    no_dead_stones,
+    run_match_series,
+)
 
 
 def _save_session_snapshot(name: str, session: GameSession, end_msg: dict) -> None:
@@ -79,7 +84,7 @@ async def run_scripted(
         await black.inbox.put(m)
     for m in white_moves:
         await white.inbox.put(m)
-    session = GameSession(black=black, white=white)
+    session = GameSession(black=black, white=white, dead_stone_resolver=no_dead_stones)
     # Fast-fail if a script under-supplies moves (session would otherwise
     # await indefinitely on an empty queue).
     await asyncio.wait_for(session.run(), timeout=timeout)
@@ -359,58 +364,70 @@ def _first_legal_move(
     return None
 
 
-async def test_random_play_always_terminates_with_valid_score():
-    """Two random bots play to termination on the core engine, with a
-    rising pass-bias so the game actually converges to an endgame
-    instead of looping through capture-recapture indefinitely.
+def _is_primitive_own_eye(board: Board, color: Color, p: tuple[int, int]) -> bool:
+    """Every orthogonal neighbor of p is a stone of `color`.
 
-    Schedule: for the first 60 turns, always play a random legal move.
-    From turn 60 to 120, probability of passing rises linearly from 0 to
-    1. After turn 120, always pass — the engine will then hit
-    consecutive_passes==2 and terminate.
+    Filling such a point is almost always a wasted move — at best it
+    fills your own eye and reduces the group's liberties, at worst it
+    kills your group. Avoiding these points is the smallest heuristic
+    that lets a uniform-random bot converge to a real endgame instead
+    of looping through capture-recapture.
+
+    Edge points only need their on-board neighbors to be `color`; off-
+    board "neighbors" don't exist and impose no constraint.
+    """
+    for n in neighbors(p):
+        if board.at(n) is not color:
+            return False
+    return True
+
+
+async def test_random_play_always_terminates_with_valid_score():
+    """Two random bots play to termination using a single eye-avoidance
+    heuristic — the smallest rule that makes uniform-random play
+    converge to a realistic endgame instead of capture-recapture loops.
+
+    Bot policy each turn:
+      1. Collect every empty point that is not a primitive own eye
+         (a point whose every orthogonal neighbor is the bot's color).
+      2. Try up to 12 random candidates from that set.
+      3. Play the first legal one; pass if none is legal.
+
+    This converges naturally — once both sides have only their own eyes
+    available (which they refuse to fill), they pass; consecutive_passes
+    hits 2; the engine terminates. No artificial pass schedule needed.
 
     The test asserts:
-      1. the game reaches is_over,
-      2. Chinese area scoring returns non-negative scores that sum
-         to at most 81 (dame >= 0),
+      1. the game reaches is_over within max_turns,
+      2. Chinese area scoring returns non-negative numbers summing to
+         at most 81 (dame >= 0),
       3. the scoring winner agrees with the raw numbers.
 
-    This is a stress test for the rules engine (captures, ko, suicide)
-    under arbitrary move orders. It drives GameState directly, dodging
-    the per-turn timer and 3-attempt budget.
+    Note: strict Chinese area scoring takes the literal final board.
+    This bot does not understand life and death, so a group with only
+    one eye still counts as alive in the score even though it would
+    be captured against a stronger opponent. The session-level dead-
+    stone marking phase (in `transport/session.py`) is what corrects
+    that for real play; this test only exercises the rules engine.
     """
     for seed in range(5):
         rng = random.Random(seed)
         game = GameState()
-        max_turns = 200
-        play_phase_end = 60
-        pass_phase_end = 120
+        max_turns = 250
 
-        for turn in range(max_turns):
+        for _ in range(max_turns):
             if game.is_over:
                 break
             color = game.to_move
-
-            # Rising pass-bias → termination.
-            if turn >= pass_phase_end:
-                pass_bias = 1.0
-            elif turn >= play_phase_end:
-                pass_bias = (turn - play_phase_end) / (pass_phase_end - play_phase_end)
-            else:
-                pass_bias = 0.0
-
-            if rng.random() < pass_bias:
-                game.pass_turn(color)
-                continue
-
             empties = [
                 (r, c)
                 for r in range(BOARD_SIZE)
                 for c in range(BOARD_SIZE)
                 if game.board.at((r, c)) is Color.EMPTY
+                and not _is_primitive_own_eye(game.board, color, (r, c))
             ]
             rng.shuffle(empties)
-            legal = _first_legal_move(game, color, empties[:10])
+            legal = _first_legal_move(game, color, empties[:12])
             if legal is None:
                 game.pass_turn(color)
             else:
@@ -485,6 +502,7 @@ async def test_rematch_two_full_games_both_scored():
             black=black_conn, white=white_conn,
             black_name="P1", white_name="P2",
             rematch_timeout_seconds=2.0,
+            dead_stone_resolver=no_dead_stones,
         ),
         timeout=10.0,
     )

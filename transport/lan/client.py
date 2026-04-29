@@ -9,9 +9,12 @@ import asyncio
 import sys
 
 from core.board import Color
+from core.board import BOARD_SIZE
 from frontend.common import (
     HELP_TEXT,
+    COLS,
     color_name,
+    format_point,
     parse_command,
     render_board_stones,
 )
@@ -58,6 +61,95 @@ def _print_game_end(msg: dict) -> None:
     print()
 
 
+def _bfs_group(stones: list[int], r0: int, c0: int) -> list[tuple[int, int]]:
+    v = stones[r0 * BOARD_SIZE + c0]
+    if v == 0:
+        return []
+    seen: set[tuple[int, int]] = set()
+    out: list[tuple[int, int]] = []
+    stack = [(r0, c0)]
+    while stack:
+        r, c = stack.pop()
+        if (r, c) in seen:
+            continue
+        seen.add((r, c))
+        if stones[r * BOARD_SIZE + c] != v:
+            continue
+        out.append((r, c))
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE:
+                stack.append((nr, nc))
+    return out
+
+
+async def _marker_mark_loop(writer, board: list[int]) -> None:
+    """Prompt the marker for representative stones; expand each click to
+    its connected group. Blank line submits. 'reset' clears."""
+    print()
+    print("  Enter coordinates of stones in dead groups, one per line.")
+    print("  Each entry expands to the whole connected group. Toggle by")
+    print("  re-entering. Blank line = submit. Type 'reset' to clear.")
+    dead: set[tuple[int, int]] = set()
+    while True:
+        try:
+            line = (await ainput("    > ")).strip()
+        except EOFError:
+            break
+        if not line:
+            break
+        if line.lower() == "reset":
+            dead.clear()
+            print("    cleared.")
+            continue
+        try:
+            kind, point = parse_command(line)
+        except ValueError as e:
+            print(f"    {e}")
+            continue
+        if kind != "play" or point is None:
+            print("    Use a coordinate like B5.")
+            continue
+        group = _bfs_group(board, point[0], point[1])
+        if not group:
+            print("    No stone at that point.")
+            continue
+        if any(p in dead for p in group):
+            for p in group:
+                dead.discard(p)
+            print(f"    Unmarked {len(group)} stone(s).")
+        else:
+            for p in group:
+                dead.add(p)
+            print(f"    Marked {len(group)} stone(s) as dead.")
+    points = [list(p) for p in sorted(dead)]
+    await write_frame(writer, {"type": "mark_dead", "points": points})
+    print(f"  Submitted {len(points)} dead point(s). Waiting for opponent...")
+
+
+async def _approver_decide(writer, board: list[int], points: list) -> None:
+    print()
+    print(f"  Opponent proposed {len(points)} dead stone(s):")
+    if not points:
+        print("    (none — opponent claims nothing is dead)")
+    else:
+        coords = ", ".join(format_point((int(r), int(c))) for r, c in points)
+        print(f"    {coords}")
+    while True:
+        try:
+            ans = (await ainput("  Approve? [y/n]: ")).strip().lower()
+        except EOFError:
+            ans = "n"
+        if ans in ("y", "yes"):
+            await write_frame(writer, {"type": "mark_decision", "approve": True})
+            print("  Approved. Computing final score...")
+            return
+        if ans in ("n", "no"):
+            await write_frame(writer, {"type": "mark_decision", "approve": False})
+            print("  Rejected. Opponent will mark again.")
+            return
+
+
 async def run_client(host: str, port: int) -> int:
     try:
         reader, writer = await asyncio.open_connection(host, port)
@@ -67,6 +159,8 @@ async def run_client(host: str, port: int) -> int:
     print(f"Connected to {host}:{port}. Waiting for game to start...")
 
     my_color: Color | None = None
+    marking_role: str | None = None
+    revealed_board: list[int] = []
     try:
         while True:
             msg = await read_frame(reader)
@@ -85,6 +179,31 @@ async def run_client(host: str, port: int) -> int:
                 _print_view(msg["view"], msg.get("losses_since_last_turn", 0))
                 if not await _input_loop(reader, writer, my_color):
                     return 0
+                continue
+
+            if t == "dead_marking_started":
+                marking_role = msg.get("your_role")
+                revealed_board = list(msg.get("full_board", []))
+                print()
+                print("=" * 60)
+                print("  DEAD-STONE MARKING PHASE")
+                print("=" * 60)
+                print(render_board_stones(revealed_board))
+                if marking_role == "marker":
+                    print("  You are the MARKER.")
+                    await _marker_mark_loop(writer, revealed_board)
+                else:
+                    print("  You are the APPROVER. Wait for opponent's proposal.")
+                continue
+
+            if t == "dead_marking_proposal":
+                await _approver_decide(writer, revealed_board, msg.get("points", []))
+                continue
+
+            if t == "dead_marking_rejected":
+                print("  Opponent rejected your marks. Mark again.")
+                if revealed_board:
+                    await _marker_mark_loop(writer, revealed_board)
                 continue
 
             if t == "game_end":

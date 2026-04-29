@@ -33,9 +33,29 @@ Captures: after placing a stone, remove every opponent group with zero liberties
 - Rationale: prevents "click scanning" — probing every point to map the opponent's board. An attacker would spend 3 attempts per turn to check 3 points; auto-skip makes scanning cost full turns
 
 ### End of game
-- Two consecutive passes (either voluntary or auto-skipped) end the game
+- Two consecutive passes (either voluntary or auto-skipped) end the
+  *play* phase
 - The full board is revealed to both players
-- **Chinese area scoring** (數子法): own stones on the board + empty points surrounded only by own stones. Higher score wins
+- **Dead-stone marking phase**: the rules engine implements strict
+  Chinese (Tromp-Taylor-style) area scoring — stones on the board are
+  *literally* counted unless explicitly removed. Because each player
+  saw only their own stones during play, neither side can mark dead
+  groups asynchronously the way OGS / KGS do. So an explicit, in-band
+  negotiation runs:
+  - **BLACK** is the marker. They click any stone in a group they
+    believe is dead; the whole connected group toggles
+  - **WHITE** is the approver. They see BLACK's proposal and either
+    **Approve** (game ends, dead stones removed before scoring) or
+    **Reject** (back to BLACK to re-mark)
+  - Roles are stable for now. Future iterations may swap on reject or
+    accept consensus from either side
+  - The resolver is **pluggable** (see `transport/session.py`'s
+    `DeadStoneResolver`) so a future automatic life/death detector
+    (Benson's algorithm or NN-based) drops in by passing a different
+    resolver — no protocol or UI changes needed
+- **Chinese area scoring** (數子法) on the post-removal board: own
+  stones still alive + empty points surrounded only by own stones.
+  Higher score wins
 
 ## Architecture
 
@@ -50,10 +70,15 @@ core/       Pure rules engine. No I/O, no networking, no UI.
 
 protocol/   JSON message schemas shared across all transports.
             client -> server:  play(x,y) | pass | resign
+                               mark_dead(points)         (marking phase)
+                               mark_decision(approve)    (marking phase)
             server -> client:  result(ok|illegal, captured_count?)
                                opponent_moved(your_losses)
                                turn_skipped
-                               game_end(revealed_board, score)
+                               dead_marking_started(role, full_board)
+                               dead_marking_proposal(points)
+                               dead_marking_rejected
+                               game_end(revealed_board, score, dead_stones)
 
 transport/  Pluggable transport.
             - lan:  stdlib asyncio TCP, length-prefixed JSON frames
