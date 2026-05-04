@@ -55,7 +55,10 @@ Captures: after placing a stone, remove every opponent group with zero liberties
     resolver — no protocol or UI changes needed
 - **Chinese area scoring** (數子法) on the post-removal board: own
   stones still alive + empty points surrounded only by own stones.
-  Higher score wins
+- **Komi 4.5** (handicap added to white). Black wins iff
+  `black_area > white_area + 4.5`. On a fully resolved 9x9 board
+  (no dame), this means BLACK needs at least 43 area points to win.
+  The non-integer komi forbids exact ties
 
 ## Architecture
 

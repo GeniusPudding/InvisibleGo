@@ -155,7 +155,9 @@ Write-Host "   ssh -i $KeyFile ubuntu@$PublicIp"
 Write-Host '   # inside the VM:'
 Write-Host '   git clone https://github.com/GeniusPudding/InvisibleGo.git'
 Write-Host '   cd InvisibleGo'
-Write-Host '   sudo bash deploy/setup.sh'
+Write-Host '   sudo bash deploy/setup-docker.sh'
+Write-Host '   # then edit deploy/Caddyfile to set your domain and:'
+Write-Host '   #   docker compose restart caddy'
 Write-Host ''
 Write-Host ' Tear down later to stop billing:'
 Write-Host "   aws ec2 terminate-instances --instance-ids $InstanceId --region $Region"

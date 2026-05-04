@@ -63,6 +63,7 @@
         <div id="opponent-label"></div>
         <div id="info"></div>
         <div id="timer" class="hidden">Time left: <span id="timer-value">—</span>s</div>
+        <div id="role-banner" class="hidden"></div>
         <div id="controls">
           <button id="pass-btn" disabled>Pass</button>
           <button id="resign-btn" disabled>Resign</button>
@@ -75,6 +76,13 @@
           <button id="back-to-lobby-btn" class="hidden">Back to lobby</button>
         </div>
         <div id="message"></div>
+        <div id="chat-pane">
+          <div id="chat-log" aria-live="polite"></div>
+          <form id="chat-form" autocomplete="off">
+            <input id="chat-input" maxlength="200" placeholder="Type to chat...">
+            <button id="chat-send" type="submit">Send</button>
+          </form>
+        </div>
         <details id="rules">
           <summary>Rules</summary>
           <ul>
@@ -83,13 +91,30 @@
             <li>You get <strong>up to 3 attempts per turn</strong>. All illegal
                 moves look identical &mdash; the game never tells you why.</li>
             <li>3 illegal attempts auto-skip your turn (counts as a pass).</li>
-            <li>Two consecutive passes end the game; Chinese area scoring decides.</li>
+            <li>Two consecutive passes end the game; the full board is revealed
+                and BLACK marks dead stones for WHITE to approve before scoring.</li>
+            <li><strong>Win condition</strong>: Chinese area scoring with
+                <strong>komi 4.5</strong>. Black's area = alive black stones +
+                empty points bordered only by black; same for white.
+                BLACK wins if black-area &gt; white-area + 4.5 &mdash; on 9x9
+                that means BLACK needs at least <strong>43</strong> area points.</li>
           </ul>
         </details>
       </aside>
     </main>
   </div>
 
-  <script src="/static/app.js"></script>
+  <div id="rematch-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-content">
+      <h3 id="rematch-modal-title">Rematch?</h3>
+      <p id="rematch-modal-text">Your opponent wants a rematch.</p>
+      <div class="modal-buttons">
+        <button id="rematch-accept-btn" class="primary">Accept</button>
+        <button id="rematch-reject-btn">Reject</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=4"></script>
 </body>
 </html>

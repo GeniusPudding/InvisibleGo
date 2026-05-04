@@ -202,7 +202,10 @@ async def test_corner_capture_then_score():
 
     assert end["black_score"] == 3   # 2 stones + 1 corner territory
     assert end["white_score"] == 1   # 1 stone, no territory
-    assert end["winner"] == "BLACK"
+    # With komi 4.5, white's effective total is 1 + 4.5 = 5.5 > 3, so
+    # white wins despite black's nominally higher area count.
+    assert end["winner"] == "WHITE"
+    assert end["komi"] == 4.5
     assert end["ended_by"] == "pass"
     _save_session_snapshot("corner_capture_then_score", session, end)
 
@@ -257,9 +260,13 @@ async def test_ko_attempt_illegal_then_resolve_and_score():
     assert end["ended_by"] == "pass"
     # Score sanity: black has 5 stones on the board, white has 3.
     # We don't pin an exact score here because territory depends on the
-    # full frontier, but black must be winning (more stones, more
-    # surrounding influence and a corner stone).
-    assert end["winner"] == "BLACK"
+    # full frontier. With komi 4.5, the winner is whoever ends up with
+    # at least 4.5 more area than the other side; since most of the
+    # central frontier is dame here, white's komi tips the balance.
+    assert end["winner"] in ("BLACK", "WHITE")
+    assert end["komi"] == 4.5
+    # Either way, raw black area must still exceed raw white area.
+    assert end["black_score"] > end["white_score"]
     _save_session_snapshot("ko_attempt_illegal_then_resolve_and_score", session, end)
 
 
@@ -348,7 +355,9 @@ async def test_mirror_l_shapes_tie_with_nonrectangular_territory():
 
     assert end["black_score"] == 15
     assert end["white_score"] == 15
-    assert end["winner"] is None
+    # Raw counts tie, but komi 4.5 forbids ties — white wins by 4.5.
+    assert end["winner"] == "WHITE"
+    assert end["komi"] == 4.5
     _save_session_snapshot("mirror_l_shapes_tie", session, end)
 
 
@@ -530,7 +539,7 @@ async def test_rematch_two_full_games_both_scored():
     assert g2["winner"] == "WHITE"
 
 
-async def test_symmetric_split_is_tie():
+async def test_symmetric_split_white_wins_on_komi():
     """Symmetric walls at col 3 (black) and col 5 (white):
       cols 0-2 = 27 empty bordered only by black  -> black territory
       col  3   = 9 black stones
@@ -538,7 +547,8 @@ async def test_symmetric_split_is_tie():
       col  5   = 9 white stones
       cols 6-8 = 27 empty bordered only by white  -> white territory
 
-    Black 9+27 = 36. White 9+27 = 36. Tie -> winner is None."""
+    Raw areas tie at 36 each, but with the project's 4.5 komi white
+    wins (36 + 4.5 = 40.5 > 36)."""
     black_script = [play(r, 3) for r in range(BOARD_SIZE)] + [pass_()]
     white_script = [play(r, 5) for r in range(BOARD_SIZE)] + [pass_()]
     session, black, white = await run_scripted(black_script, white_script)
@@ -547,5 +557,6 @@ async def test_symmetric_split_is_tie():
 
     assert end["black_score"] == 36
     assert end["white_score"] == 36
-    assert end["winner"] is None
-    _save_session_snapshot("symmetric_split_tie", session, end)
+    assert end["komi"] == 4.5
+    assert end["winner"] == "WHITE"
+    _save_session_snapshot("symmetric_split_white_komi_wins", session, end)

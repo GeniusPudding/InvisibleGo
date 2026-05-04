@@ -141,7 +141,9 @@ cat <<EOF
    # inside the VM:
    git clone https://github.com/GeniusPudding/InvisibleGo.git
    cd InvisibleGo
-   sudo bash deploy/setup.sh
+   sudo bash deploy/setup-docker.sh
+   # then edit deploy/Caddyfile to set your domain and:
+   #   docker compose restart caddy
 
  Tear down later (stops billing):
    aws ec2 terminate-instances --instance-ids $INSTANCE_ID --region $REGION

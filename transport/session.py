@@ -11,13 +11,20 @@ of transport.
 from __future__ import annotations
 
 import asyncio
+import logging
 from abc import ABC, abstractmethod
 from typing import Any, Awaitable, Callable
 
 from core.board import BOARD_SIZE, Color, Point
 from core.game import GameState, MoveOutcome
-from core.scoring import area_score
+from core.resolvers.chain import EngineUnavailable
+from core.scoring import DEFAULT_KOMI, area_score
 from protocol.messages import view_to_dict
+
+log = logging.getLogger("invisiblego.session")
+
+# Free-form chat: clamped server-side; never trusted from client.
+MAX_CHAT_LEN = 200
 
 DEFAULT_TURN_TIMEOUT_SECONDS = 20.0
 DEFAULT_REMATCH_DECISION_SECONDS = 30.0
@@ -48,6 +55,37 @@ class Connection(ABC):
         """Return the next message, or None on clean disconnect."""
 
 
+class _BufferedConnection(Connection):
+    """Wraps another Connection with a single-ended pushback list.
+
+    GameSession's inbound reader task is greedy — it can consume a
+    rematch message off the wire before the per-game loop is done.
+    Wrapping the underlying connection in this buffered layer lets the
+    session push any unread messages back onto the front of the read
+    stream before tearing down, so the next recv() (e.g. from
+    `_await_rematch`) sees them in their original order.
+    """
+
+    def __init__(self, inner: Connection) -> None:
+        self._inner = inner
+        self._pushback: list[dict[str, Any] | None] = []
+
+    async def send(self, msg: dict[str, Any]) -> None:
+        await self._inner.send(msg)
+
+    async def recv(self) -> dict[str, Any] | None:
+        if self._pushback:
+            return self._pushback.pop(0)
+        return await self._inner.recv()
+
+    def push_front(self, msgs: list[dict[str, Any] | None]) -> None:
+        # Maintain original order: items earlier in `msgs` should be
+        # returned first. Insert in reverse so the first one ends up
+        # at index 0.
+        for m in reversed(msgs):
+            self._pushback.insert(0, m)
+
+
 class GameSession:
     def __init__(
         self,
@@ -73,6 +111,13 @@ class GameSession:
         # Populated by the dead-stone marking phase, exposed in game_end
         # so clients can render the removed groups distinctly.
         self.removed_dead: set[Point] = set()
+        # Inbound message queues — populated by per-connection reader
+        # tasks that transparently filter out chat messages and forward
+        # them to the opponent. The main game loop reads from these
+        # queues instead of conn.recv() directly so chat works
+        # asynchronously, regardless of whose turn it is.
+        self._inbound: dict[Color, asyncio.Queue[dict[str, Any] | None]] = {}
+        self._reader_tasks: dict[Color, asyncio.Task[None]] = {}
 
     async def run(self) -> None:
         """Drive the game to completion. Sends welcome messages first."""
@@ -90,7 +135,13 @@ class GameSession:
                 "opponent": self.names[Color.BLACK],
             }
         )
+        self._start_inbound_readers()
+        try:
+            await self._run_inner()
+        finally:
+            await self._stop_inbound_readers()
 
+    async def _run_inner(self) -> None:
         while not self.game.is_over:
             current = self.game.to_move
             conn = self.conns[current]
@@ -113,7 +164,14 @@ class GameSession:
         if self.dead_stone_resolver is None:
             dead = await self._interactive_dead_resolver()
         else:
-            dead = await self.dead_stone_resolver(self)
+            try:
+                dead = await self.dead_stone_resolver(self)
+            except EngineUnavailable:
+                # Every automatic resolver in the chain was unavailable
+                # (no katago binary, no gnugo, etc). Fall back to the
+                # interactive marker/approver flow so the game can still
+                # finish without a hard crash.
+                dead = await self._interactive_dead_resolver()
         if dead is None:
             # Resolver broadcast game_end itself (disconnect during
             # marking). Nothing more for us to do.
@@ -122,6 +180,93 @@ class GameSession:
             self.removed_dead = set(dead)
             self.game.board = self.game.board.with_stones_removed(self.removed_dead)
         await self._broadcast_game_end(ended_by="pass", resigner=None)
+
+    # Inbound message plumbing -----------------------------------------
+
+    def _start_inbound_readers(self) -> None:
+        """Spawn one reader task per side. Each reads from its
+        connection forever, forwards `chat` messages to both players,
+        and queues all other messages for the main game loop."""
+        for color, conn in self.conns.items():
+            q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+            self._inbound[color] = q
+            self._reader_tasks[color] = asyncio.create_task(
+                self._inbound_reader(color, conn, q)
+            )
+
+    async def _stop_inbound_readers(self) -> None:
+        for t in self._reader_tasks.values():
+            t.cancel()
+        for t in self._reader_tasks.values():
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        # Drain anything the reader had put on the queue but the main
+        # loop never consumed (e.g. a rematch message that arrived
+        # right at end-of-game), and push it back onto the underlying
+        # connection if it's a buffered one. Without this, post-game
+        # callers like `_await_rematch` would never see those messages.
+        for color, q in self._inbound.items():
+            leftover: list[dict[str, Any] | None] = []
+            while True:
+                try:
+                    leftover.append(q.get_nowait())
+                except asyncio.QueueEmpty:
+                    break
+            if leftover:
+                conn = self.conns[color]
+                if isinstance(conn, _BufferedConnection):
+                    conn.push_front(leftover)
+        self._reader_tasks.clear()
+        self._inbound.clear()
+
+    async def _inbound_reader(
+        self,
+        color: Color,
+        conn: Connection,
+        q: "asyncio.Queue[dict[str, Any] | None]",
+    ) -> None:
+        try:
+            while True:
+                msg = await conn.recv()
+                if msg is None:
+                    await q.put(None)
+                    return
+                if msg.get("type") == "chat":
+                    await self._forward_chat(color, msg.get("text"))
+                    continue
+                await q.put(msg)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception("inbound reader for %s crashed", color.name)
+            await q.put(None)
+
+    async def _forward_chat(self, sender: Color, text: Any) -> None:
+        if not isinstance(text, str):
+            return
+        clean = text.strip()[:MAX_CHAT_LEN]
+        if not clean:
+            return
+        payload = {"type": "chat", "from": sender.name, "text": clean}
+        # Echo to BOTH players so the sender sees a confirmed copy and
+        # the order of chat lines is identical on both ends.
+        for c in self.conns.values():
+            try:
+                await c.send(payload)
+            except Exception:
+                pass
+
+    async def _recv_game_message(
+        self, color: Color, *, timeout: float | None = None
+    ) -> dict[str, Any] | None:
+        q = self._inbound[color]
+        if timeout is None:
+            return await q.get()
+        return await asyncio.wait_for(q.get(), timeout=timeout)
+
+    # ------------------------------------------------------------------
 
     async def _handle_turn(self, current: Color, conn: Connection) -> bool:
         """Process input from the current player until their turn ends.
@@ -137,7 +282,7 @@ class GameSession:
         while True:
             remaining = max(0.001, deadline - loop.time())
             try:
-                msg = await asyncio.wait_for(conn.recv(), timeout=remaining)
+                msg = await self._recv_game_message(current, timeout=remaining)
             except asyncio.TimeoutError:
                 self.game.pass_turn(current)
                 await conn.send({"type": "turn_timeout"})
@@ -214,8 +359,10 @@ class GameSession:
         )
 
         while True:
-            msg = await marker.recv()
+            log.debug("marking: awaiting mark_dead from %s", marker_color.name)
+            msg = await self._recv_game_message(marker_color)
             if msg is None:
+                log.info("marking: marker %s disconnected", marker_color.name)
                 await self._broadcast_game_end(
                     ended_by="disconnect", resigner=marker_color
                 )
@@ -223,15 +370,22 @@ class GameSession:
             if msg.get("type") == "mark_dead":
                 proposal = self._sanitize_dead_points(msg.get("points") or [])
             else:
-                # Defensive — anything other than mark_dead is treated
-                # as an empty proposal so the approver can still react.
+                log.warning(
+                    "marking: marker sent %r, treating as empty proposal",
+                    msg.get("type"),
+                )
                 proposal = []
+            log.debug("marking: forwarding proposal of %d points", len(proposal))
             await approver.send(
                 {"type": "dead_marking_proposal", "points": proposal}
             )
 
-            decision = await approver.recv()
+            log.debug("marking: awaiting mark_decision from %s", approver_color.name)
+            decision = await self._recv_game_message(approver_color)
             if decision is None:
+                log.info(
+                    "marking: approver %s disconnected", approver_color.name
+                )
                 await self._broadcast_game_end(
                     ended_by="disconnect", resigner=approver_color
                 )
@@ -240,8 +394,10 @@ class GameSession:
                 decision.get("type") == "mark_decision"
                 and decision.get("approve") is True
             ):
+                log.info("marking: approved with %d dead stones", len(proposal))
                 return {(int(r), int(c)) for r, c in proposal}
             # Reject (any other shape is treated as a reject too).
+            log.debug("marking: rejected (msg=%r), looping back to marker", decision)
             await marker.send({"type": "dead_marking_rejected"})
 
     def _sanitize_dead_points(self, raw: Any) -> list[list[int]]:
@@ -268,7 +424,7 @@ class GameSession:
         return result
 
     async def _broadcast_game_end(self, ended_by: str, resigner: Color | None) -> None:
-        score = area_score(self.game.board)
+        score = area_score(self.game.board, komi=DEFAULT_KOMI)
         if ended_by in ("resign", "disconnect") and resigner is not None:
             winner: str | None = resigner.opponent().name
         else:
@@ -279,6 +435,7 @@ class GameSession:
             "full_board": list(self.game.board.stones),
             "black_score": score.black,
             "white_score": score.white,
+            "komi": score.komi,
             "winner": winner,
             "ended_by": ended_by,
             "resigner": resigner.name if resigner else None,
@@ -301,18 +458,126 @@ class GameSession:
                 pass
 
 
-async def _await_rematch(conn: Connection, timeout: float) -> bool:
-    """Return True iff the client sent a rematch-agree within the timeout.
+async def _listen_for_rematch_decision(
+    conn: Connection, deadline: float
+) -> bool | None:
+    """Read one rematch decision from `conn`, ignoring chat / unknown
+    messages. Returns True for `agree:true`, False for `agree:false`,
+    None on disconnect or deadline elapsed.
 
-    Any other message, a decline, a timeout, or a disconnect counts as 'no'.
+    Used by `_negotiate_rematch` for both the initial "did anyone want
+    a rematch?" listen and the post-invite "did the invitee accept?"
+    response read.
     """
+    loop = asyncio.get_running_loop()
+    while True:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return None
+        try:
+            msg = await asyncio.wait_for(conn.recv(), timeout=remaining)
+        except asyncio.TimeoutError:
+            return None
+        if msg is None:
+            return None
+        if msg.get("type") == "rematch":
+            return msg.get("agree") is True
+        # Chat or unknown — silently ignore and keep listening.
+
+
+async def _negotiate_rematch(
+    conns: dict[Color, Connection], timeout: float
+) -> bool:
+    """Implement the invite/respond rematch flow.
+
+    1. Listen on BOTH sides concurrently. The first side to send
+       `rematch agree=true` becomes the inviter.
+    2. Server forwards `{type: "rematch_invite", from: COLOR}` to the
+       OTHER side, which gets a popup with [Accept] [Reject] in the UI.
+    3. Server awaits the invitee's `rematch agree=...` response.
+       - True  → both sides agreed, return True (start new game)
+       - False → notify the inviter via `rematch_declined`, return False
+       - timeout / disconnect → notify the inviter, return False
+    4. Edge cases:
+       - Both sides click Rematch (almost) simultaneously: both
+         listeners return True, no invite needed, return True.
+       - One side preemptively declines (sends agree=false): cannot
+         actually happen in the new UI, but we still handle it — if
+         the OTHER side did agree we notify them; otherwise just end.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    listeners = {
+        color: asyncio.create_task(
+            _listen_for_rematch_decision(conn, deadline)
+        )
+        for color, conn in conns.items()
+    }
     try:
-        msg = await asyncio.wait_for(conn.recv(), timeout=timeout)
-    except asyncio.TimeoutError:
+        done, _ = await asyncio.wait(
+            listeners.values(), return_when=asyncio.FIRST_COMPLETED
+        )
+    except BaseException:
+        for t in listeners.values():
+            t.cancel()
+        raise
+    # Cancel any still-listening task — we'll re-read directly below
+    # if we need the other side's response.
+    for color, task in listeners.items():
+        if task not in done:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+    results: dict[Color, bool | None] = {}
+    for color, task in listeners.items():
+        if task in done:
+            results[color] = task.result()
+
+    true_sides = [c for c, r in results.items() if r is True]
+    false_sides = [c for c, r in results.items() if r is False]
+
+    # Both sides happened to send agree=true at once: skip the invite
+    # round-trip and start the next game.
+    if len(true_sides) == 2:
+        return True
+
+    # One agreed, one preemptively declined → notify the agreer.
+    if true_sides and false_sides:
+        agreer = true_sides[0]
+        try:
+            await conns[agreer].send({"type": "rematch_declined"})
+        except Exception:
+            pass
         return False
-    if msg is None:
+
+    # Exactly one side agreed; the other is still pending. Send the
+    # invite and wait for their explicit response.
+    if len(true_sides) == 1:
+        first = true_sides[0]
+        other = first.opponent()
+        try:
+            await conns[other].send(
+                {"type": "rematch_invite", "from": first.name}
+            )
+        except Exception:
+            return False
+        remaining_deadline = loop.time() + max(0.0, deadline - loop.time())
+        other_resp = await _listen_for_rematch_decision(
+            conns[other], remaining_deadline
+        )
+        if other_resp is True:
+            return True
+        try:
+            await conns[first].send({"type": "rematch_declined"})
+        except Exception:
+            pass
         return False
-    return msg.get("type") == "rematch" and bool(msg.get("agree", True))
+
+    # Nobody agreed (timeouts / disconnects / both declined preemptively).
+    return False
 
 
 async def run_match_series(
@@ -330,6 +595,12 @@ async def run_match_series(
     GameSession runs. Any other outcome (one declines, one disconnects,
     either times out) ends the series.
     """
+    # Wrap each connection so the session's inbound reader can push
+    # leftover messages (e.g. a rematch message that arrived during
+    # game 1's late phase) back into the read stream for the next
+    # `_await_rematch` to consume.
+    black = _BufferedConnection(black) if not isinstance(black, _BufferedConnection) else black
+    white = _BufferedConnection(white) if not isinstance(white, _BufferedConnection) else white
     while True:
         session = GameSession(
             black=black,
@@ -342,20 +613,13 @@ async def run_match_series(
         await session.run()
         if session.ended_by == "disconnect":
             return
-        decisions = await asyncio.gather(
-            _await_rematch(black, rematch_timeout_seconds),
-            _await_rematch(white, rematch_timeout_seconds),
+        agreed = await _negotiate_rematch(
+            {Color.BLACK: black, Color.WHITE: white},
+            rematch_timeout_seconds,
         )
-        if all(decisions):
+        if agreed:
             # Swap colors so the prior WHITE plays first next round.
             black, white = white, black
             black_name, white_name = white_name, black_name
             continue
-        # Notify any side that agreed that the rematch won't happen.
-        for conn, agreed in zip((black, white), decisions):
-            if agreed:
-                try:
-                    await conn.send({"type": "rematch_declined"})
-                except Exception:
-                    pass
         return

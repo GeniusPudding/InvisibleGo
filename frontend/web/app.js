@@ -73,6 +73,14 @@ const approveDeadBtn = document.getElementById("approve-dead-btn");
 const rejectDeadBtn = document.getElementById("reject-dead-btn");
 const timerEl = document.getElementById("timer");
 const timerValueEl = document.getElementById("timer-value");
+const roleBannerEl = document.getElementById("role-banner");
+const chatLogEl = document.getElementById("chat-log");
+const chatFormEl = document.getElementById("chat-form");
+const chatInputEl = document.getElementById("chat-input");
+const rematchModalEl = document.getElementById("rematch-modal");
+const rematchModalTextEl = document.getElementById("rematch-modal-text");
+const rematchAcceptBtn = document.getElementById("rematch-accept-btn");
+const rematchRejectBtn = document.getElementById("rematch-reject-btn");
 
 // --- Audio cues --------------------------------------------------------
 // Browsers block AudioContext creation until a user gesture. We create it
@@ -110,7 +118,10 @@ function playTurnChime() {
 }
 
 function playUrgentTick() {
-  playTone(660, 60, "square", 0.1);
+  // Two-tone chirp — much more audible than the prior 60 ms square blip
+  // and clearly distinguishable from the turn-start chime.
+  playTone(540, 80, "triangle", 0.22);
+  setTimeout(() => playTone(720, 110, "triangle", 0.22), 70);
 }
 
 function show(screen) {
@@ -264,7 +275,12 @@ showNumbersBtn.addEventListener("click", () => {
 
 function renderLastMoveMarker() {
   const layer = document.getElementById("stones-layer");
-  if (!layer || lastOwnMove === null || myColor === null) return;
+  if (!layer) return;
+  // Strip any stale marker first — placeStoneLocal appends after a
+  // prior renderStones, so without this we'd accumulate one circle
+  // per played move (the "two current-move dots after auto-skip" bug).
+  for (const el of [...layer.querySelectorAll(".last-move-marker")]) el.remove();
+  if (lastOwnMove === null || myColor === null) return;
   const [r, c] = lastOwnMove;
   const [cx, cy] = intersectionXY(r, c);
   const onBlack = myColor === BLACK;
@@ -360,6 +376,31 @@ function renderDeadOverlay() {
   }
 }
 
+// Top-of-page phase status. Same wording on both clients so players
+// can tell at a glance which phase the game is in (whose turn,
+// who's marking, etc) without scanning sidebars.
+function setPhaseStatus(text, kind) {
+  statusEl.textContent = text || "";
+  statusEl.classList.remove(
+    "phase-marking-marker",
+    "phase-marking-approve",
+    "phase-game-over"
+  );
+  if (kind) statusEl.classList.add(kind);
+}
+
+function setRoleBanner(text, kind) {
+  if (!text) {
+    roleBannerEl.classList.add("hidden");
+    roleBannerEl.innerHTML = "";
+    roleBannerEl.classList.remove("marker", "approver");
+    return;
+  }
+  roleBannerEl.innerHTML = text;
+  roleBannerEl.classList.remove("hidden", "marker", "approver");
+  if (kind) roleBannerEl.classList.add(kind);
+}
+
 function enterMarkingPhase(role, board) {
   markingRole = role;
   revealedBoard = board.slice();
@@ -371,15 +412,26 @@ function enterMarkingPhase(role, board) {
   passBtn.classList.add("hidden");
   resignBtn.classList.add("hidden");
   setHitsLive(role === "marker");
+  // Top-of-page banner is the same on BOTH clients so the system
+  // status is unified.
+  setPhaseStatus("BLACK is marking dead stones", "phase-marking-marker");
   if (role === "marker") {
     submitDeadBtn.classList.remove("hidden");
     clearDeadBtn.classList.remove("hidden");
     submitDeadBtn.disabled = false;
-    setMessage("Click groups you think are dead, then Submit. The opponent will approve or reject.", "ok");
-    statusEl.textContent = "Marking dead stones...";
+    setRoleBanner(
+      "<strong>You mark dead stones</strong>" +
+      "Click any stone in a dead group to toggle it (click again to undo); press <em>Submit dead</em> when done.",
+      "marker",
+    );
+    setMessage("Click groups you think are dead, then Submit.", "ok");
   } else {
+    setRoleBanner(
+      "<strong>You approve the proposal</strong>" +
+      "Wait for your opponent to submit, then choose <em>Approve</em> (game ends) or <em>Reject</em> (back to your opponent).",
+      "approver",
+    );
     setMessage("Opponent is marking dead stones. Please wait.", "ok");
-    statusEl.textContent = "Waiting for opponent to mark...";
   }
 }
 
@@ -395,6 +447,7 @@ function exitMarkingPhase() {
   passBtn.classList.remove("hidden");
   resignBtn.classList.remove("hidden");
   setHitsLive(false);
+  setRoleBanner(null);
 }
 
 submitDeadBtn.addEventListener("click", () => {
@@ -405,6 +458,7 @@ submitDeadBtn.addEventListener("click", () => {
   submitDeadBtn.disabled = true;
   setHitsLive(false);
   setMessage("Submitted. Waiting for opponent to approve...", "ok");
+  setPhaseStatus("WHITE is reviewing the proposal", "phase-marking-approve");
 });
 
 clearDeadBtn.addEventListener("click", () => {
@@ -456,7 +510,13 @@ function setTurnControls(on) {
   passBtn.disabled = !on;
   resignBtn.disabled = !on;
   setHitsLive(on);
-  statusEl.textContent = on ? "Your turn." : "Waiting for opponent...";
+  // Show whose turn it is in the top banner. Same wording on both
+  // clients: "BLACK's turn" / "WHITE's turn".
+  if (myColor !== null) {
+    const myName = myColor === BLACK ? "BLACK" : "WHITE";
+    const otherName = myColor === BLACK ? "WHITE" : "BLACK";
+    setPhaseStatus(`${on ? myName : otherName}'s turn`);
+  }
 }
 
 function startTurnTimer(seconds) {
@@ -495,9 +555,9 @@ function stopTurnTimer() {
 
 function resetToLobby() {
   if (ws && ws.readyState === WebSocket.OPEN) {
-    try {
-      ws.send(JSON.stringify({ type: "rematch", agree: false }));
-    } catch (_) { /* ignore */ }
+    // Just close; the server treats a disconnect at this stage as
+    // "no rematch wanted". We don't pre-send agree:false because in
+    // the new flow only the modal Reject button does that.
     ws.close();
   }
   ws = null;
@@ -510,10 +570,11 @@ function resetToLobby() {
   fullMoveHistory = [];
   stopTurnTimer();
   hideEndGameButtons();
+  hideRematchModal();
   setTurnControls(false);
   setMessage("", null);
   showLobbyError("");
-  statusEl.textContent = "";
+  setPhaseStatus("");
   infoEl.innerHTML = "";
   colorLabel.textContent = "";
   colorLabel.removeAttribute("style");
@@ -533,13 +594,76 @@ function showEndGameButtons() {
   rematchBtn.disabled = false;
 }
 
+// --- Chat -----------------------------------------------------------
+
+function appendChatLine(from, text, kind) {
+  if (!chatLogEl) return;
+  const line = document.createElement("div");
+  line.className = "chat-line";
+  if (kind === "system") {
+    line.classList.add("chat-system");
+    line.textContent = text;
+  } else {
+    const tag = document.createElement("span");
+    tag.className = "chat-from " + (from === "BLACK" ? "black" : "white");
+    tag.textContent = `${from}:`;
+    const body = document.createElement("span");
+    body.textContent = " " + text;
+    line.appendChild(tag);
+    line.appendChild(body);
+  }
+  chatLogEl.appendChild(line);
+  chatLogEl.scrollTop = chatLogEl.scrollHeight;
+}
+
+function clearChat() {
+  if (chatLogEl) chatLogEl.innerHTML = "";
+}
+
+chatFormEl.addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const text = (chatInputEl.value || "").trim();
+  if (!text) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "chat", text: text.slice(0, 200) }));
+  chatInputEl.value = "";
+});
+
 backToLobbyBtn.addEventListener("click", resetToLobby);
 
 rematchBtn.addEventListener("click", () => {
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   ws.send(JSON.stringify({ type: "rematch", agree: true }));
   rematchBtn.disabled = true;
-  setMessage("Rematch requested. Waiting for opponent...", "ok");
+  rematchBtn.classList.add("hidden");
+  setMessage("Rematch requested. Waiting for opponent to accept...", "ok");
+});
+
+// Rematch modal: only shown when the OTHER side requests a rematch.
+function showRematchModal(fromColor) {
+  rematchModalTextEl.textContent =
+    `${fromColor} wants a rematch. Accept to play another game (colors swap), or reject to end the series.`;
+  rematchModalEl.classList.remove("hidden");
+}
+
+function hideRematchModal() {
+  rematchModalEl.classList.add("hidden");
+}
+
+rematchAcceptBtn.addEventListener("click", () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "rematch", agree: true }));
+  hideRematchModal();
+  setMessage("Accepted. Starting next game...", "ok");
+});
+
+rematchRejectBtn.addEventListener("click", () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "rematch", agree: false }));
+  hideRematchModal();
+  rematchBtn.classList.add("hidden");
+  setMessage("Rematch declined.", "error");
+  backToLobbyBtn.classList.remove("hidden");
 });
 
 // --- Lobby ---
@@ -563,7 +687,7 @@ function openSocket() {
       showLobbyError("Connection closed.");
       show("lobby");
     } else {
-      statusEl.textContent = "Disconnected.";
+      setPhaseStatus("Disconnected", "phase-game-over");
       setTurnControls(false);
     }
   };
@@ -666,8 +790,14 @@ function handleMessage(msg) {
       stopTurnTimer();
       setMessage("", null);
       infoEl.innerHTML = "";
+      clearChat();
+      appendChatLine("", `New game — you play ${msg.color}.`, "system");
       show("game");
       initBoard();
+      break;
+
+    case "chat":
+      appendChatLine(msg.from || "?", msg.text || "", null);
       break;
 
     case "your_turn": {
@@ -747,17 +877,20 @@ function handleMessage(msg) {
       renderStones(msg.full_board, true);
       setTurnControls(false);
       stopTurnTimer();
+      setPhaseStatus("Game over", "phase-game-over");
       let result = msg.winner ? `${msg.winner} wins.` : "Draw.";
       if (msg.ended_by === "resign") result += ` (${msg.resigner} resigned.)`;
       if (msg.ended_by === "disconnect") result += ` (${msg.resigner} disconnected.)`;
+      const komiLine = msg.komi
+        ? `WHITE score: ${msg.white_score} + ${msg.komi} komi = ${msg.white_score + msg.komi}`
+        : `WHITE score: ${msg.white_score}`;
       infoEl.innerHTML = `
         <strong>Game over.</strong><br>
         BLACK score: ${msg.black_score}<br>
-        WHITE score: ${msg.white_score}<br>
+        ${komiLine}<br>
         ${result}
       `;
       setMessage("Full board revealed. Rematch for another game?", "ok");
-      statusEl.textContent = "Game over.";
       if (msg.ended_by === "disconnect") {
         // Opponent gone — no rematch possible.
         backToLobbyBtn.classList.remove("hidden");
@@ -793,6 +926,7 @@ function handleMessage(msg) {
           : "Opponent proposed no dead stones. Approve or Reject.",
         "ok"
       );
+      setPhaseStatus("WHITE is reviewing the proposal", "phase-marking-approve");
       break;
     }
 
@@ -801,6 +935,14 @@ function handleMessage(msg) {
       submitDeadBtn.disabled = false;
       setHitsLive(true);
       setMessage("Opponent rejected. Adjust the dead-stone selection and submit again.", "error");
+      setPhaseStatus("BLACK is re-marking dead stones", "phase-marking-marker");
+      break;
+
+    case "rematch_invite":
+      // The OTHER side clicked Rematch first; show modal popup.
+      // Hide this side's own Rematch button — they decide via the modal.
+      rematchBtn.classList.add("hidden");
+      showRematchModal(msg.from || "Opponent");
       break;
 
     case "error":

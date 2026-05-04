@@ -21,10 +21,23 @@ header {
   margin-bottom: 16px;
 }
 h1 { margin: 0; font-size: 1.5rem; }
-#status { color: #555; font-style: italic; }
+/* Top status banner: shows the same phase notification on both
+   players' screens (whose turn, who's marking, etc). */
+#status {
+  color: #444;
+  font-weight: 600;
+  font-size: 0.95rem;
+  padding: 4px 12px;
+  border-radius: 4px;
+}
+#status.phase-marking-marker  { background: #fff7d6; color: #6a5300; }
+#status.phase-marking-approve { background: #e0f0ff; color: #1e466b; }
+#status.phase-game-over       { background: #e6e6e6; color: #333; }
 
 .screen { display: block; }
-.screen.hidden { display: none; }
+/* Generic hide. !important so it wins against more-specific element
+   rules like `#timer { ... }` that might otherwise force display. */
+.hidden { display: none !important; }
 
 /* Lobby / waiting */
 .lobby-box {
@@ -149,6 +162,61 @@ button:not(:disabled):hover { background: var(--accent); color: white; }
 #rules { margin-top: 16px; color: #555; }
 #rules ul { padding-left: 20px; line-height: 1.6; }
 
+#role-banner {
+  padding: 10px 12px;
+  background: #e0f0ff;
+  border-left: 4px solid #2a5b8a;
+  border-radius: 2px;
+  font-size: 0.95rem;
+  line-height: 1.4;
+}
+#role-banner.marker  { background: #fff7d6; border-color: #d4a017; }
+#role-banner.approver { background: #e0f0ff; border-color: #2a5b8a; }
+#role-banner strong { display: block; margin-bottom: 2px; font-size: 1rem; }
+
+/* Chat pane */
+#chat-pane {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid #d0c8b8;
+  border-radius: 4px;
+  background: #fbf8f0;
+  padding: 8px;
+}
+#chat-log {
+  height: 160px;
+  overflow-y: auto;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  padding: 4px 6px;
+  background: white;
+  border-radius: 3px;
+  border: 1px solid #e6dec8;
+}
+#chat-log .chat-line { margin-bottom: 4px; }
+#chat-log .chat-from { font-weight: 700; margin-right: 4px; }
+#chat-log .chat-from.black { color: #111; }
+#chat-log .chat-from.white { color: #888; }
+#chat-log .chat-system { color: #888; font-style: italic; }
+#chat-form {
+  display: flex;
+  gap: 6px;
+}
+#chat-input {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 0.95rem;
+  border: 1px solid #c0b8a8;
+  border-radius: 3px;
+  font-family: inherit;
+}
+#chat-form button {
+  padding: 6px 14px;
+  font-size: 0.9rem;
+}
+
 .line { stroke: var(--board-line); stroke-width: 1.2; }
 .star { fill: var(--board-line); }
 .hit { fill: transparent; cursor: default; }
@@ -174,6 +242,40 @@ button:not(:disabled):hover { background: var(--accent); color: white; }
    marking phase). Pointer-events disabled so the stone underneath
    keeps catching clicks for group toggling. */
 .dead-x { stroke: #ff2020; stroke-width: 3; pointer-events: none; }
+
+/* Rematch invitation modal */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-content {
+  background: white;
+  padding: 28px 32px;
+  border-radius: 8px;
+  box-shadow: 0 4px 28px rgba(0, 0, 0, 0.25);
+  max-width: 380px;
+  text-align: center;
+}
+.modal-content h3 { margin: 0 0 8px 0; }
+.modal-content p { margin: 0 0 20px 0; color: #555; }
+.modal-buttons {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+.modal-buttons button { min-width: 100px; }
+.modal-buttons button.primary {
+  background: var(--accent);
+  color: white;
+}
+.modal-buttons button.primary:hover {
+  background: var(--accent-hover);
+}
 .coord {
   fill: var(--board-line);
   font: 12px system-ui, sans-serif;

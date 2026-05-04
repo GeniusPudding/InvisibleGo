@@ -20,8 +20,10 @@ No installation. Works on any browser, desktop or mobile.
    own, a suicide, or a ko) all look identical, so single-point scanning
    is expensive.
 
-Two passes end the game; the full board is revealed and Chinese area
-scoring decides.
+Two passes end the game; the full board is revealed and BLACK marks
+dead stones for WHITE to approve before Chinese area scoring decides.
+Komi is **4.5** — on a fully resolved 9x9 board (no dame) BLACK needs at
+least **43** area points (alive stones + own-only territory) to win.
 
 ## Why it's interesting
 
@@ -39,7 +41,8 @@ scoring decides.
   playable.
 - **Random matchmaking + private rooms.** The lobby works like online
   Go servers (OGS / KGS) — hub-and-spoke through a central matchmaker.
-- **Chinese area scoring** (數子法) on the revealed final board.
+- **Chinese area scoring** (數子法) with komi 4.5 on the revealed final
+  board. BLACK needs ≥43 area points on 9x9 to win.
 
 ## How it works
 
