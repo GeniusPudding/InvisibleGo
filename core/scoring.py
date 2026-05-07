@@ -1,10 +1,12 @@
 """Chinese area scoring with optional komi.
 
 Komi is a fixed handicap added to white's score to compensate for
-black's first-move advantage. On 9x9 the project uses komi 4.5 — the
-standard "non-integer to forbid ties" value where black needs at
-least 43 area points to win on a fully-resolved board (since
-2*43 - 81 = 5 > 4.5 and 2*42 - 81 = 3 < 4.5).
+black's first-move advantage. On 9x9 this project uses komi 6.5 —
+roughly the consensus fair value (KataGo's 9x9 evaluation puts the
+black first-move advantage at ~7 points; 6.5 / 7.5 are the standard
+half-integer choices that forbid ties). With komi 6.5 black needs at
+least 44 area points to win on a fully-resolved board, since
+2*44 - 81 = 7 > 6.5 and 2*43 - 81 = 5 < 6.5.
 """
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ from dataclasses import dataclass
 
 from core.board import Board, Color, Point, neighbors
 
-DEFAULT_KOMI = 4.5
+DEFAULT_KOMI = 6.5
 
 
 @dataclass(frozen=True)

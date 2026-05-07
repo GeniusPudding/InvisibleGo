@@ -70,6 +70,7 @@
           <button id="show-numbers-btn">Show #</button>
           <button id="submit-dead-btn" class="hidden">Submit dead</button>
           <button id="clear-dead-btn" class="hidden">Clear</button>
+          <button id="undo-submit-btn" class="hidden">Undo submit</button>
           <button id="approve-dead-btn" class="hidden">Approve</button>
           <button id="reject-dead-btn" class="hidden">Reject</button>
           <button id="rematch-btn" class="hidden">Rematch</button>
@@ -94,10 +95,10 @@
             <li>Two consecutive passes end the game; the full board is revealed
                 and BLACK marks dead stones for WHITE to approve before scoring.</li>
             <li><strong>Win condition</strong>: Chinese area scoring with
-                <strong>komi 4.5</strong>. Black's area = alive black stones +
+                <strong>komi 6.5</strong>. Black's area = alive black stones +
                 empty points bordered only by black; same for white.
-                BLACK wins if black-area &gt; white-area + 4.5 &mdash; on 9x9
-                that means BLACK needs at least <strong>43</strong> area points.</li>
+                BLACK wins if black-area &gt; white-area + 6.5 &mdash; on 9x9
+                that means BLACK needs at least <strong>44</strong> area points.</li>
           </ul>
         </details>
       </aside>
@@ -115,6 +116,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>

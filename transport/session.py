@@ -358,47 +358,120 @@ class GameSession:
             }
         )
 
+        # Two phases per submission cycle:
+        #   Phase 1 — wait *specifically* for marker to submit. Approver
+        #             input has nothing to act on yet, so we don't race.
+        #   Phase 2 — proposal is on the table; race marker (re-submit /
+        #             withdraw) vs approver (approve / reject).
+        # Cycling back to phase 1 happens on reject and on withdraw.
         while True:
-            log.debug("marking: awaiting mark_dead from %s", marker_color.name)
-            msg = await self._recv_game_message(marker_color)
-            if msg is None:
-                log.info("marking: marker %s disconnected", marker_color.name)
-                await self._broadcast_game_end(
-                    ended_by="disconnect", resigner=marker_color
-                )
-                return None
-            if msg.get("type") == "mark_dead":
-                proposal = self._sanitize_dead_points(msg.get("points") or [])
-            else:
-                log.warning(
-                    "marking: marker sent %r, treating as empty proposal",
-                    msg.get("type"),
-                )
-                proposal = []
-            log.debug("marking: forwarding proposal of %d points", len(proposal))
+            pending: list[list[int]] | None = None
+            while pending is None:
+                msg = await self._inbound[marker_color].get()
+                if msg is None:
+                    log.info("marking: marker %s disconnected", marker_color.name)
+                    await self._broadcast_game_end(
+                        ended_by="disconnect", resigner=marker_color
+                    )
+                    return None
+                t = msg.get("type")
+                if t == "mark_dead":
+                    pending = self._sanitize_dead_points(msg.get("points") or [])
+                elif t == "cancel_mark_dead":
+                    # Nothing pending to withdraw — silently ignore.
+                    continue
+                else:
+                    log.warning(
+                        "marking: marker sent %r before submit; ignoring", t
+                    )
+                    continue
+
+            log.debug("marking: forwarding proposal of %d points", len(pending))
             await approver.send(
-                {"type": "dead_marking_proposal", "points": proposal}
+                {"type": "dead_marking_proposal", "points": pending}
             )
 
-            log.debug("marking: awaiting mark_decision from %s", approver_color.name)
-            decision = await self._recv_game_message(approver_color)
-            if decision is None:
-                log.info(
-                    "marking: approver %s disconnected", approver_color.name
+            # Phase 2: marker can re-submit / withdraw, approver can decide.
+            done_with_round = False
+            while not done_with_round:
+                color, msg = await self._race_two_inbound(
+                    marker_color, approver_color
                 )
-                await self._broadcast_game_end(
-                    ended_by="disconnect", resigner=approver_color
-                )
-                return None
-            if (
-                decision.get("type") == "mark_decision"
-                and decision.get("approve") is True
-            ):
-                log.info("marking: approved with %d dead stones", len(proposal))
-                return {(int(r), int(c)) for r, c in proposal}
-            # Reject (any other shape is treated as a reject too).
-            log.debug("marking: rejected (msg=%r), looping back to marker", decision)
-            await marker.send({"type": "dead_marking_rejected"})
+                if msg is None:
+                    log.info("marking: %s disconnected", color.name)
+                    await self._broadcast_game_end(
+                        ended_by="disconnect", resigner=color
+                    )
+                    return None
+                t = msg.get("type")
+                if color is marker_color:
+                    if t == "mark_dead":
+                        pending = self._sanitize_dead_points(
+                            msg.get("points") or []
+                        )
+                        log.debug(
+                            "marking: marker re-submitted with %d points",
+                            len(pending),
+                        )
+                        await approver.send(
+                            {"type": "dead_marking_proposal", "points": pending}
+                        )
+                    elif t == "cancel_mark_dead":
+                        log.debug("marking: marker withdrew the proposal")
+                        await approver.send({"type": "dead_marking_withdrawn"})
+                        done_with_round = True  # back to phase 1
+                    else:
+                        log.warning("marking: marker unexpected %r", t)
+                    continue
+                # Approver branch.
+                if t == "mark_decision":
+                    if msg.get("approve") is True:
+                        log.info(
+                            "marking: approved with %d dead stones", len(pending)
+                        )
+                        return {(int(r), int(c)) for r, c in pending}
+                    log.debug("marking: rejected, looping back to marker")
+                    await marker.send({"type": "dead_marking_rejected"})
+                    done_with_round = True  # back to phase 1
+                else:
+                    log.warning("marking: approver unexpected %r", t)
+
+    async def _race_two_inbound(
+        self, color_a: Color, color_b: Color
+    ) -> tuple[Color, dict[str, Any] | None]:
+        """Wait until the first message arrives on either side's inbound
+        queue, returning (color, msg). When both queues happen to have a
+        message ready in the same scheduling tick, both `q.get()` tasks
+        complete; we pick one and push the other back to the *front* of
+        its queue (using the underlying deque's appendleft) so FIFO
+        ordering within that color is preserved."""
+        q_a = self._inbound[color_a]
+        q_b = self._inbound[color_b]
+        task_a = asyncio.create_task(q_a.get())
+        task_b = asyncio.create_task(q_b.get())
+        done, pending = await asyncio.wait(
+            {task_a, task_b}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        chosen = done.pop()
+        chosen_color = color_a if chosen is task_a else color_b
+        chosen_msg = chosen.result()
+        if done:
+            other = done.pop()
+            other_color = color_a if other is task_a else color_b
+            other_msg = other.result()
+            # Put back at the *front* — ordinary Queue.put() appends and
+            # would reorder this message after anything else the inbound
+            # reader has since enqueued. asyncio.Queue stores items in
+            # `_queue` (a collections.deque) and consumes them via
+            # popleft, so appendleft restores correct FIFO position.
+            self._inbound[other_color]._queue.appendleft(other_msg)
+        return chosen_color, chosen_msg
 
     def _sanitize_dead_points(self, raw: Any) -> list[list[int]]:
         """Filter incoming dead-stone proposal: only on-board points

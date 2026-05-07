@@ -55,10 +55,12 @@ Captures: after placing a stone, remove every opponent group with zero liberties
     resolver — no protocol or UI changes needed
 - **Chinese area scoring** (數子法) on the post-removal board: own
   stones still alive + empty points surrounded only by own stones.
-- **Komi 4.5** (handicap added to white). Black wins iff
-  `black_area > white_area + 4.5`. On a fully resolved 9x9 board
-  (no dame), this means BLACK needs at least 43 area points to win.
-  The non-integer komi forbids exact ties
+- **Komi 6.5** (handicap added to white). Black wins iff
+  `black_area > white_area + 6.5`. On a fully resolved 9x9 board
+  (no dame), this means BLACK needs at least 44 area points to win.
+  The non-integer komi forbids exact ties. (KataGo's 9x9 evaluation
+  puts black's first-move advantage at ~7 points, so 6.5 is roughly
+  fair; 4.5 was too generous to black.)
 
 ## Architecture
 
@@ -74,13 +76,15 @@ core/       Pure rules engine. No I/O, no networking, no UI.
 protocol/   JSON message schemas shared across all transports.
             client -> server:  play(x,y) | pass | resign
                                mark_dead(points)         (marking phase)
+                               cancel_mark_dead          (marker withdraws)
                                mark_decision(approve)    (marking phase)
             server -> client:  result(ok|illegal, captured_count?)
                                opponent_moved(your_losses)
                                turn_skipped
                                dead_marking_started(role, full_board)
                                dead_marking_proposal(points)
-                               dead_marking_rejected
+                               dead_marking_withdrawn    (sent to approver)
+                               dead_marking_rejected     (sent to marker)
                                game_end(revealed_board, score, dead_stones)
 
 transport/  Pluggable transport.

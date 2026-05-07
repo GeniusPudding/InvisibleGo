@@ -69,6 +69,7 @@ const rematchBtn = document.getElementById("rematch-btn");
 const showNumbersBtn = document.getElementById("show-numbers-btn");
 const submitDeadBtn = document.getElementById("submit-dead-btn");
 const clearDeadBtn = document.getElementById("clear-dead-btn");
+const undoSubmitBtn = document.getElementById("undo-submit-btn");
 const approveDeadBtn = document.getElementById("approve-dead-btn");
 const rejectDeadBtn = document.getElementById("reject-dead-btn");
 const timerEl = document.getElementById("timer");
@@ -416,12 +417,10 @@ function enterMarkingPhase(role, board) {
   // status is unified.
   setPhaseStatus("BLACK is marking dead stones", "phase-marking-marker");
   if (role === "marker") {
-    submitDeadBtn.classList.remove("hidden");
-    clearDeadBtn.classList.remove("hidden");
-    submitDeadBtn.disabled = false;
+    showMarkerEditingState();
     setRoleBanner(
       "<strong>You mark dead stones</strong>" +
-      "Click any stone in a dead group to toggle it (click again to undo); press <em>Submit dead</em> when done.",
+      "Click any stone in a dead group to toggle it (click again to undo); press <em>Submit dead</em> when done. You can <em>Undo submit</em> if you change your mind before WHITE decides.",
       "marker",
     );
     setMessage("Click groups you think are dead, then Submit.", "ok");
@@ -442,6 +441,7 @@ function exitMarkingPhase() {
   approverIsDeciding = false;
   submitDeadBtn.classList.add("hidden");
   clearDeadBtn.classList.add("hidden");
+  undoSubmitBtn.classList.add("hidden");
   approveDeadBtn.classList.add("hidden");
   rejectDeadBtn.classList.add("hidden");
   passBtn.classList.remove("hidden");
@@ -450,14 +450,33 @@ function exitMarkingPhase() {
   setRoleBanner(null);
 }
 
+// Marker UI helpers — toggling between "still editing" and
+// "submitted, waiting for approver" states. The Undo button only
+// makes sense in the submitted state and lets the marker pull the
+// proposal back if they hit Submit by accident.
+function showMarkerEditingState() {
+  submitDeadBtn.classList.remove("hidden");
+  submitDeadBtn.disabled = false;
+  clearDeadBtn.classList.remove("hidden");
+  undoSubmitBtn.classList.add("hidden");
+  setHitsLive(true);
+}
+
+function showMarkerSubmittedState() {
+  submitDeadBtn.classList.add("hidden");
+  clearDeadBtn.classList.add("hidden");
+  undoSubmitBtn.classList.remove("hidden");
+  undoSubmitBtn.disabled = false;
+  setHitsLive(false);
+}
+
 submitDeadBtn.addEventListener("click", () => {
   if (markingRole !== "marker") return;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   const points = [...proposedDead].map((k) => k.split(",").map(Number));
   ws.send(JSON.stringify({ type: "mark_dead", points }));
-  submitDeadBtn.disabled = true;
-  setHitsLive(false);
-  setMessage("Submitted. Waiting for opponent to approve...", "ok");
+  showMarkerSubmittedState();
+  setMessage("Submitted. Waiting for opponent — click Undo submit to keep editing.", "ok");
   setPhaseStatus("WHITE is reviewing the proposal", "phase-marking-approve");
 });
 
@@ -465,6 +484,15 @@ clearDeadBtn.addEventListener("click", () => {
   if (markingRole !== "marker") return;
   proposedDead.clear();
   renderDeadOverlay();
+});
+
+undoSubmitBtn.addEventListener("click", () => {
+  if (markingRole !== "marker") return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: "cancel_mark_dead" }));
+  showMarkerEditingState();
+  setMessage("Submission withdrawn. Adjust the marks and Submit again.", "ok");
+  setPhaseStatus("BLACK is marking dead stones", "phase-marking-marker");
 });
 
 approveDeadBtn.addEventListener("click", () => {
@@ -932,10 +960,22 @@ function handleMessage(msg) {
 
     case "dead_marking_rejected":
       // Marker is told their proposal was rejected.
-      submitDeadBtn.disabled = false;
-      setHitsLive(true);
+      showMarkerEditingState();
       setMessage("Opponent rejected. Adjust the dead-stone selection and submit again.", "error");
       setPhaseStatus("BLACK is re-marking dead stones", "phase-marking-marker");
+      break;
+
+    case "dead_marking_withdrawn":
+      // Approver: marker pulled back the proposal. Hide decision
+      // buttons; clear the on-board overlay so we don't show stale
+      // marks while the opponent re-thinks.
+      approverIsDeciding = false;
+      approveDeadBtn.classList.add("hidden");
+      rejectDeadBtn.classList.add("hidden");
+      proposedDead.clear();
+      renderDeadOverlay();
+      setMessage("Opponent withdrew the proposal — they're editing again.", "ok");
+      setPhaseStatus("BLACK is marking dead stones", "phase-marking-marker");
       break;
 
     case "rematch_invite":

@@ -379,6 +379,77 @@ async def test_marking_phase_approver_disconnect_aborts():
 
 
 @pytest.mark.asyncio
+async def test_marking_phase_marker_can_undo_submit_then_resubmit():
+    """Marker submits → cancels → re-submits with a different set →
+    approver receives the new proposal and approves. Approver must see
+    a `dead_marking_withdrawn` between the two proposals.
+
+    Uses a `feeder` coroutine running concurrently with the session so
+    each marker action lands before the next one — otherwise the race
+    between marker's three messages and the approver's approval is
+    non-deterministic when all four are queued up front.
+    """
+    black, white = FakeConn(), FakeConn()
+    session = GameSession(black=black, white=white)
+
+    async def feeder():
+        # Setup: B(0,0), W(8,8), both pass to enter the marking phase.
+        await black.inbox.put({"type": "play", "row": 0, "col": 0})
+        await white.inbox.put({"type": "play", "row": 8, "col": 8})
+        await black.inbox.put({"type": "pass"})
+        await white.inbox.put({"type": "pass"})
+        # Marker's first (wrong) submit; let server propagate to approver.
+        await black.inbox.put({"type": "mark_dead", "points": [[0, 0]]})
+        await asyncio.sleep(0.05)
+        # Marker withdraws, then the approver-side overlay clears; let
+        # that withdrawal be observed before the corrected submit.
+        await black.inbox.put({"type": "cancel_mark_dead"})
+        await asyncio.sleep(0.05)
+        await black.inbox.put({"type": "mark_dead", "points": [[8, 8]]})
+        await asyncio.sleep(0.05)
+        # Now safe to approve — proposal in flight is the corrected one.
+        await white.inbox.put({"type": "mark_decision", "approve": True})
+
+    await asyncio.gather(feeder(), session.run())
+
+    approver_events = [
+        m for m in white.outbox
+        if m["type"] in ("dead_marking_proposal", "dead_marking_withdrawn")
+    ]
+    assert [m["type"] for m in approver_events] == [
+        "dead_marking_proposal",
+        "dead_marking_withdrawn",
+        "dead_marking_proposal",
+    ]
+    assert approver_events[0]["points"] == [[0, 0]]
+    assert approver_events[2]["points"] == [[8, 8]]
+
+    end = next(m for m in black.outbox if m["type"] == "game_end")
+    assert end["dead_stones"] == [[8, 8]]
+
+
+@pytest.mark.asyncio
+async def test_marking_phase_cancel_before_submit_is_noop():
+    """A `cancel_mark_dead` arriving before any submit is silently
+    ignored — no `dead_marking_withdrawn` goes out, no state changes."""
+    black, white = FakeConn(), FakeConn()
+    session = GameSession(black=black, white=white)
+    await black.inbox.put({"type": "pass"})
+    await white.inbox.put({"type": "pass"})
+    # Cancel BEFORE any submit. Then a real submit. Then approve.
+    await black.inbox.put({"type": "cancel_mark_dead"})
+    await black.inbox.put({"type": "mark_dead", "points": []})
+    await white.inbox.put({"type": "mark_decision", "approve": True})
+    await session.run()
+
+    # No spurious withdrawn event.
+    assert not any(m["type"] == "dead_marking_withdrawn" for m in white.outbox)
+    # Exactly one proposal forwarded.
+    proposals = [m for m in white.outbox if m["type"] == "dead_marking_proposal"]
+    assert len(proposals) == 1
+
+
+@pytest.mark.asyncio
 async def test_marking_phase_filters_invalid_points():
     """Server drops points that are off-board, empty, or malformed."""
     black, white = FakeConn(), FakeConn()
