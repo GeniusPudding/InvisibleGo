@@ -324,18 +324,28 @@ async def test_marking_phase_approve_removes_dead_stones():
 
 @pytest.mark.asyncio
 async def test_marking_phase_reject_then_approve():
-    """Rejection loops back to the marker so they can re-propose."""
+    """Rejection loops back to the marker so they can re-propose.
+
+    Uses a `feeder` coroutine because the phase-2 race between marker's
+    next mark_dead and approver's decision is otherwise non-deterministic
+    when all messages are queued up front."""
     black, white = FakeConn(), FakeConn()
     session = GameSession(black=black, white=white)
-    await black.inbox.put({"type": "pass"})
-    await white.inbox.put({"type": "pass"})
-    # Round 1: BLACK proposes empty list, WHITE rejects.
-    await black.inbox.put({"type": "mark_dead", "points": []})
-    await white.inbox.put({"type": "mark_decision", "approve": False})
-    # Round 2: BLACK proposes empty again, WHITE approves to terminate.
-    await black.inbox.put({"type": "mark_dead", "points": []})
-    await white.inbox.put({"type": "mark_decision", "approve": True})
-    await session.run()
+
+    async def feeder():
+        await black.inbox.put({"type": "pass"})
+        await white.inbox.put({"type": "pass"})
+        # Round 1: BLACK proposes empty list, WHITE rejects.
+        await black.inbox.put({"type": "mark_dead", "points": []})
+        await asyncio.sleep(0.05)
+        await white.inbox.put({"type": "mark_decision", "approve": False})
+        await asyncio.sleep(0.05)
+        # Round 2: BLACK proposes empty again, WHITE approves to terminate.
+        await black.inbox.put({"type": "mark_dead", "points": []})
+        await asyncio.sleep(0.05)
+        await white.inbox.put({"type": "mark_decision", "approve": True})
+
+    await asyncio.gather(feeder(), session.run())
 
     # BLACK got told once that they were rejected.
     rejections = [m for m in black.outbox if m["type"] == "dead_marking_rejected"]

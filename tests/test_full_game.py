@@ -270,30 +270,70 @@ async def test_ko_attempt_illegal_then_resolve_and_score():
     _save_session_snapshot("ko_attempt_illegal_then_resolve_and_score", session, end)
 
 
-async def test_auto_skip_on_own_turn_counts_toward_double_pass():
-    """After white passes (1st consecutive pass), black auto-skips by
-    attempting 3 illegal own-occupied moves. That auto-skip is the 2nd
-    consecutive pass -> game ends. The sole black stone owns all 81
-    points under area scoring."""
+async def test_auto_skip_does_not_close_game_on_lone_pass():
+    """Auto-skip is not a pass. White passes (1st consecutive pass),
+    black auto-skips on its turn — that resets the pass counter rather
+    than ending the game. To finish, both sides must voluntarily pass
+    in succession after the skip."""
     black_script = [
         play(4, 4),   # legal opener
         play(4, 4),   # own-occupied, illegal x3 -> auto-skip
         play(4, 4),
         play(4, 4),
+        pass_(),      # only after this + white's pass does the game end
     ]
-    white_script = [pass_()]
+    white_script = [pass_(), pass_()]
     session, black, white = await run_scripted(black_script, white_script)
     end = game_end_of(black)
     print(dump_endgame(session, end))
 
     assert session.game.is_over
+    assert end["ended_by"] == "pass"
+    # White's first pass alone — interrupted by black's auto-skip — must
+    # not have closed the game; only the pass-pass after the skip does.
     assert end["black_score"] == BOARD_SIZE * BOARD_SIZE
     assert end["white_score"] == 0
     assert end["winner"] == "BLACK"
-    # The auto-skip's 3rd illegal must report zero attempts remaining.
+    # The auto-skip's 3rd illegal must still report zero attempts remaining.
     illegals = [m for m in black.outbox if m["type"] == "illegal"]
     assert illegals[-1]["attempts_remaining"] == 0
     _save_session_snapshot("auto_skip_on_own_turn", session, end)
+
+
+async def test_both_sides_three_illegal_in_a_row_keeps_game_alive():
+    """End-to-end: both sides exhaust 3 illegal attempts back-to-back.
+    Neither skip is a pass, so the play phase must keep running. Only
+    after both players voluntarily pass does the game close."""
+    # Each side first plants one stone so the other has an
+    # opponent-occupied target to repeatedly fail on.
+    black_script = [
+        play(4, 4),       # legal opener (T1)
+        play(5, 5),       # opp-occupied -> illegal (T3 attempt 1)
+        play(5, 5),       # T3 attempt 2
+        play(5, 5),       # T3 attempt 3 -> auto-skip
+        pass_(),          # T5
+    ]
+    white_script = [
+        play(5, 5),       # legal (T2)
+        play(4, 4),       # opp-occupied -> illegal (T4 attempt 1)
+        play(4, 4),       # T4 attempt 2
+        play(4, 4),       # T4 attempt 3 -> auto-skip
+        pass_(),          # T6
+    ]
+    session, black, white = await run_scripted(black_script, white_script)
+    end = game_end_of(black)
+    print(dump_endgame(session, end))
+
+    # Each side must have logged exactly 3 illegal messages with the
+    # last one reporting attempts_remaining == 0 (the auto-skip).
+    for outbox in (black.outbox, white.outbox):
+        ill = [m for m in outbox if m["type"] == "illegal"]
+        assert len(ill) == 3, ill
+        assert ill[-1]["attempts_remaining"] == 0
+    # Exactly two voluntary passes ended the game; back-to-back skips did not.
+    assert session.game.is_over
+    assert end["ended_by"] == "pass"
+    _save_session_snapshot("both_sides_three_illegal", session, end)
 
 
 async def test_resign_gives_opponent_the_win_even_when_behind():

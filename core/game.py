@@ -158,7 +158,7 @@ class GameState:
     def _record_illegal(self) -> MoveResult:
         self.attempts_remaining -= 1
         if self.attempts_remaining <= 0:
-            self._advance_via_pass()
+            self._advance_via_skip()
             return MoveResult(
                 outcome=MoveOutcome.ILLEGAL,
                 attempts_remaining=0,
@@ -176,5 +176,14 @@ class GameState:
         if self.consecutive_passes >= 2:
             self.is_over = True
             return
+        self.to_move = self.to_move.opponent()
+        self.attempts_remaining = MAX_ATTEMPTS_PER_TURN
+
+    def _advance_via_skip(self) -> None:
+        # Auto-skip from 3 illegal attempts is NOT a pass: the player tried
+        # to play. Only two consecutive *voluntary* passes end the game, so
+        # the counter resets here — a skip breaks any chain of passes.
+        self.history.add(self.board.stones)
+        self.consecutive_passes = 0
         self.to_move = self.to_move.opponent()
         self.attempts_remaining = MAX_ATTEMPTS_PER_TURN

@@ -28,13 +28,17 @@ Captures: after placing a stone, remove every opponent group with zero liberties
 ### Turn structure — 3-attempt rule
 - On each turn the player may attempt up to **3 moves**
 - Every illegal attempt returns a generic `ILLEGAL` response with **no** reason field — opponent-occupied, own-occupied, suicide, and ko all look identical from the client side
-- If all 3 attempts are illegal, the turn is auto-skipped (equivalent to a pass)
+- If all 3 attempts are illegal, the turn is auto-skipped — control
+  passes to the opponent, but the auto-skip is **not** a pass. The
+  player tried to play; it does not advance the game-end counter, and
+  any in-flight chain of voluntary passes is reset to zero
 - A legal move ends the turn immediately
 - Rationale: prevents "click scanning" — probing every point to map the opponent's board. An attacker would spend 3 attempts per turn to check 3 points; auto-skip makes scanning cost full turns
 
 ### End of game
-- Two consecutive passes (either voluntary or auto-skipped) end the
-  *play* phase
+- Two consecutive **voluntary** passes end the *play* phase. A timeout
+  is treated as a pass; a 3-illegal auto-skip is not — both players
+  must actively pass back-to-back to finish
 - The full board is revealed to both players
 - **Dead-stone marking phase**: the rules engine implements strict
   Chinese (Tromp-Taylor-style) area scoring — stones on the board are
@@ -249,4 +253,9 @@ Windows (dominated by Qt DLLs).
 - **Illegal responses must be indistinguishable**. The `ILLEGAL` message carries no field revealing *why* the move was illegal. Enforced at the protocol schema level (no `reason` field exists).
 - **`core/` has no I/O**. If you reach for `print`, `input`, `open`, `socket`, or `requests` inside `core/`, stop — that belongs in a frontend or transport.
 - **Tests first for rules code**. Go edge cases (ko, multi-stone captures, suicide-that-actually-captures, self-atari) are easy to get wrong. Every rule clause gets a dedicated test.
+- **All tests must pass before any commit or push**. Run the full
+  `pytest` suite locally before staging. A change that breaks tests
+  doesn't ship — fix the test or fix the code, but never push red.
+  Adding a rule (e.g. "auto-skip is not a pass") means adding a
+  dedicated test for it in the same change.
 - **No premature GUI work**. The CLI frontend is the validation harness for the rules engine. GUI work begins only after LAN play is solid.

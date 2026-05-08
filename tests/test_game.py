@@ -183,18 +183,58 @@ def test_two_consecutive_passes_end_game():
     assert g.is_over
 
 
-def test_auto_skip_counts_as_pass_toward_end():
+def test_auto_skip_does_not_count_as_pass():
+    """Only two *consecutive voluntary* passes end the game. A 3-illegal
+    auto-skip rotates the turn but is not a pass — and it resets any
+    in-flight pass counter, so a chain of passes broken by a skip cannot
+    silently end the game."""
     g = GameState()
     g.play(Color.BLACK, (4, 4))
-    # White auto-skips via 3 illegal attempts
+    # White auto-skips via 3 illegal attempts on Black's stone.
     for _ in range(3):
         g.play(Color.WHITE, (4, 4))
+    assert not g.is_over
     assert g.to_move is Color.BLACK
-    # Black passes; that's one pass. Now White auto-skip again.
+    assert g.consecutive_passes == 0
+
+    # Black passes (counter=1). White auto-skip again — counter resets to 0.
     g.pass_turn(Color.BLACK)
+    assert g.consecutive_passes == 1
     for _ in range(3):
         g.play(Color.WHITE, (4, 4))
-    # Black's pass + White's auto-skip = two consecutive passes -> game over
+    assert not g.is_over
+    assert g.consecutive_passes == 0
+
+    # Only two consecutive voluntary passes end the game.
+    g.pass_turn(Color.BLACK)
+    g.pass_turn(Color.WHITE)
+    assert g.is_over
+
+
+def test_both_sides_three_illegal_does_not_end_game():
+    """If both players exhaust 3 illegal attempts back-to-back, neither
+    counts as a pass — the play phase keeps running. Only when both
+    sides voluntarily pass does the game finish. This is the strict
+    'two voluntary passes end the game' rule the user asked for."""
+    g = GameState()
+    # Black plays once so each side has an own-occupied square handy.
+    g.play(Color.BLACK, (4, 4))
+    g.play(Color.WHITE, (5, 5))
+    # Black's turn: 3 illegal at white's stone (opponent-occupied) -> skip.
+    for _ in range(3):
+        g.play(Color.BLACK, (5, 5))
+    assert not g.is_over
+    assert g.consecutive_passes == 0
+    # White's turn: 3 illegal at black's stone -> skip.
+    for _ in range(3):
+        g.play(Color.WHITE, (4, 4))
+    assert not g.is_over
+    assert g.consecutive_passes == 0
+    # Even after a back-to-back skip-skip, the game is still alive.
+    # Now both sides voluntarily pass: that's what ends it.
+    g.pass_turn(Color.BLACK)
+    assert not g.is_over
+    g.pass_turn(Color.WHITE)
     assert g.is_over
 
 

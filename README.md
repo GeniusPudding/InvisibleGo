@@ -35,8 +35,10 @@ least **44** area points (alive stones + own-only territory) to win.
   `ILLEGAL` and a remaining-attempts count, nothing else — no way to
   deduce the opponent's position from probe reactions.
 - **3-attempt auto-skip.** Every probe costs an attempt toward the turn.
-  Three illegals in a row auto-pass the turn. Scanning the board one
-  point at a time is a waste of turns.
+  Three illegals in a row hand control to the opponent — but the skip is
+  *not* a pass, so it can't sneak the game to an end. Only voluntary
+  passes end the play phase. Scanning the board one point at a time is
+  a waste of turns.
 - **20-second turn timer.** Stalling is auto-passed, so the pace stays
   playable.
 - **Random matchmaking + private rooms.** The lobby works like online

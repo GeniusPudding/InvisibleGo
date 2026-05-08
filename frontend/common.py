@@ -24,8 +24,9 @@ Rules reminders:
   - You see only your own stones. Empty-looking points may hide an opponent stone.
   - You may try up to 3 moves per turn. Every illegal attempt looks identical:
     the system says ILLEGAL but never tells you why.
-  - 3 illegal attempts auto-skip your turn (counts as a pass).
-  - Two consecutive passes end the game; Chinese area scoring decides.
+  - 3 illegal attempts auto-skip your turn. The skip is NOT a pass —
+    only voluntary passes count toward ending the game.
+  - Two consecutive voluntary passes end the game; Chinese area scoring decides.
 """.rstrip()
 
 
